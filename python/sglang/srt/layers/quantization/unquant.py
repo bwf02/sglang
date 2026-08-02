@@ -235,6 +235,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         self.with_bias = False
         self.use_flashinfer_trtllm_moe = use_flashinfer_trtllm_moe
         self.use_deep_gemm = use_deep_gemm
+        self.use_sparse_gemm = get_moe_runner_backend().is_sparse_gemm()
         self._cache_permute_indices = dict({})
 
     def create_weights(
@@ -407,6 +408,28 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 weight = getattr(layer, weight_name)
                 weight.data = npu_format_cast(weight)
 
+        if self.use_sparse_gemm:
+            from sglang.srt.layers.moe.moe_runner.sparse_gemm import (
+                load_sparse_gemm_moe_weight,
+            )
+
+            device = layer.w13_weight.device
+            layer.sparse_gemm_gate_weight = load_sparse_gemm_moe_weight(
+                layer_id=layer.layer_id,
+                projection="gate_proj",
+                device=device,
+            )
+            layer.sparse_gemm_up_weight = load_sparse_gemm_moe_weight(
+                layer_id=layer.layer_id,
+                projection="up_proj",
+                device=device,
+            )
+            layer.sparse_gemm_down_weight = load_sparse_gemm_moe_weight(
+                layer_id=layer.layer_id,
+                projection="down_proj",
+                device=device,
+            )
+
         return
 
     def maybe_restore_flashinfer_trtllm_bf16_weight_shape_for_load(
@@ -472,6 +495,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             backend = MoeRunnerBackend.FLASHINFER_CUTLASS
         elif self.use_deep_gemm:
             backend = MoeRunnerBackend.DEEP_GEMM
+        elif self.use_sparse_gemm:
+            backend = MoeRunnerBackend.SPARSE_GEMM
         elif self.use_triton_kernels:
             backend = MoeRunnerBackend.TRITON_KERNELS
         else:
@@ -552,6 +577,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 w13_weight=w13_weight,
                 w2_weight=w2_weight,
                 use_fp8=use_fp8,
+            )
+            return self.runner.run(dispatch_output, quant_info)
+        elif self.runner.runner_backend.is_sparse_gemm():
+            from sglang.srt.layers.moe.moe_runner.sparse_gemm import (
+                SparseGemmMoeQuantInfo,
+            )
+
+            quant_info = SparseGemmMoeQuantInfo(
+                gate_weight=layer.sparse_gemm_gate_weight,
+                up_weight=layer.sparse_gemm_up_weight,
+                down_weight=layer.sparse_gemm_down_weight,
+                dense_w13_weight=layer.w13_weight,
             )
             return self.runner.run(dispatch_output, quant_info)
         elif self.use_flashinfer_cutlass:

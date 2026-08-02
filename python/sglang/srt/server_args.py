@@ -244,6 +244,7 @@ MIS_DELIMITER_TOKEN_ID = 9999
 MOE_RUNNER_BACKEND_CHOICES = [
     "auto",
     "deep_gemm",
+    "sparse_gemm",
     "triton",
     "triton_kernel",
     "flashinfer_trtllm",
