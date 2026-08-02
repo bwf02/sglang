@@ -1,3 +1,4 @@
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -689,7 +690,10 @@ def fused_gate_sigmoid_mul_add(
     if num_tokens >= 1024:
         config["num_warps"] = min(config["num_warps"], 8)
 
-    pdl_kwargs = {"USE_PDL": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+    enable_pdl = (
+        is_arch_support_pdl() and os.environ.get("SGLANG_ENABLE_TRITON_PDL") != "0"
+    )
+    pdl_kwargs = {"USE_PDL": True, "launch_pdl": True} if enable_pdl else {}
 
     _fused_gate_sigmoid_mul_add_kernel[(num_tokens,)](
         hidden_states,
