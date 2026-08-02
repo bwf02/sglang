@@ -25,7 +25,6 @@ from sglang.srt.layers.moe.moe_runner.deep_gemm import (
     pre_permute_standard_to_deep_gemm,
 )
 from sglang.srt.layers.moe.utils import MoeRunnerBackend
-from sglang.srt.utils import dispose_tensor
 
 
 _SPARSE_GEMM_MOE_PATH_ENV = "SGLANG_SPARSE_GEMM_MOE_PATH"
@@ -96,7 +95,6 @@ class SparseGemmRunnerCore(MoeRunnerCore):
             masked_m,
             expected_m,
         )
-        dispose_tensor(hidden_states)
 
         down_input = (F.silu(gate_output.float()) * up_output.float()).to(
             torch.bfloat16
