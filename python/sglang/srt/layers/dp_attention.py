@@ -320,6 +320,18 @@ def get_attention_dp_size() -> int:
     return _ATTN_DP_SIZE
 
 
+def get_attention_cp_group() -> GroupCoordinator:
+    return get_attn_cp_group()
+
+
+def get_attention_cp_rank() -> int:
+    return get_attn_cp_group().rank_in_group
+
+
+def get_attention_cp_size() -> int:
+    return get_attn_cp_group().world_size
+
+
 @contextmanager
 def disable_dp_size():
     """Patch the tp group temporarily until this function ends.
