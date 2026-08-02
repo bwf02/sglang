@@ -22,7 +22,6 @@ from sglang.srt.layers.moe.moe_runner.deep_gemm import (
     DeepGemmRunnerInput,
     DeepGemmRunnerOutput,
     post_permute_deep_gemm_to_standard,
-    pre_permute_standard_to_deep_gemm,
 )
 from sglang.srt.layers.moe.utils import MoeRunnerBackend
 
@@ -202,8 +201,47 @@ def pre_permute_standard_to_sparse_gemm(
     runner_config: MoeRunnerConfig,
     running_state: dict,
 ) -> DeepGemmRunnerInput:
-    return pre_permute_standard_to_deep_gemm(
-        dispatch_output, quant_info, runner_config, running_state
+    from sglang.srt.layers.moe.ep_moe.kernels import moe_ep_deepgemm_preprocess
+
+    hidden_states, topk_output = (
+        dispatch_output.hidden_states,
+        dispatch_output.topk_output,
+    )
+    topk_weights, topk_ids, _ = topk_output
+
+    hidden_states_shape = hidden_states.shape
+    hidden_states_dtype = hidden_states.dtype
+    hidden_states_device = hidden_states.device
+
+    output_dtype = (
+        torch.bfloat16
+        if quant_info.w13_weight.dtype == torch.bfloat16
+        else torch.float8_e4m3fn
+    )
+    masked_m, expected_m, src2dst, packed_hidden_states, hidden_states_scale = (
+        moe_ep_deepgemm_preprocess(
+            topk_ids,
+            runner_config.num_local_experts,
+            hidden_states,
+            runner_config.top_k,
+            quant_info.block_shape,
+            output_dtype=output_dtype,
+        )
+    )
+
+    running_state["topk_ids"] = topk_ids
+    running_state["topk_weights"] = topk_weights
+    running_state["hidden_states_shape"] = hidden_states_shape
+    running_state["hidden_states_dtype"] = hidden_states_dtype
+    running_state["hidden_states_device"] = hidden_states_device
+    running_state["src2dst"] = src2dst
+
+    return DeepGemmRunnerInput(
+        hidden_states=packed_hidden_states,
+        hidden_states_scale=hidden_states_scale,
+        use_masked_gemm=True,
+        masked_m=masked_m,
+        expected_m=expected_m,
     )
 
 
