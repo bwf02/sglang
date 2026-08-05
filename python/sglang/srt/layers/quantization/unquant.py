@@ -414,14 +414,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             )
 
             device = layer.w13_weight.device
-            layer.sparse_gemm_gate_weight = load_sparse_gemm_moe_weight(
+            layer.sparse_gemm_w13_weight = load_sparse_gemm_moe_weight(
                 layer_id=layer.layer_id,
-                projection="gate_proj",
-                device=device,
-            )
-            layer.sparse_gemm_up_weight = load_sparse_gemm_moe_weight(
-                layer_id=layer.layer_id,
-                projection="up_proj",
+                projection="w13_weight",
                 device=device,
             )
             layer.sparse_gemm_down_weight = load_sparse_gemm_moe_weight(
@@ -585,8 +580,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             )
 
             quant_info = SparseGemmMoeQuantInfo(
-                gate_weight=layer.sparse_gemm_gate_weight,
-                up_weight=layer.sparse_gemm_up_weight,
+                w13_weight=layer.sparse_gemm_w13_weight,
                 down_weight=layer.sparse_gemm_down_weight,
                 dense_w13_weight=layer.w13_weight,
             )

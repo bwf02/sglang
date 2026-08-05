@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 
 from sglang.srt.layers.moe.moe_runner.base import (
     MoeQuantInfo,
@@ -32,16 +31,16 @@ _SPARSE_GEMM_KERNEL_ENV = "SGLANG_SPARSE_GEMM_KERNEL"
 
 @dataclass
 class SparseGemmMoeQuantInfo(MoeQuantInfo):
-    gate_weight: object
-    up_weight: object
+    w13_weight: object
     down_weight: object
     dense_w13_weight: torch.Tensor
     block_shape: Optional[list[int]] = None
 
     @property
-    def w13_weight(self) -> torch.Tensor:
+    def dense_w13(self) -> torch.Tensor:
         # The standard->DeepGEMM pre-permute path only needs dtype/device and
-        # block_shape from quant_info. SparseGEMM keeps gate/up physically split.
+        # block_shape from quant_info. SparseGEMM keeps the real sparse w13
+        # payload separately because the preprocess only needs dense metadata.
         return self.dense_w13_weight
 
 
@@ -82,23 +81,26 @@ class SparseGemmRunnerCore(MoeRunnerCore):
         if masked_m is None:
             raise ValueError("masked_m is required for SparseGEMM masked grouped GEMM")
 
-        gate_output = _grouped_masked_gemm(
+        gateup_output = _grouped_masked_gemm(
             hidden_states,
-            quant_info.gate_weight,
-            masked_m,
-            expected_m,
-        )
-        up_output = _grouped_masked_gemm(
-            hidden_states,
-            quant_info.up_weight,
+            quant_info.w13_weight,
             masked_m,
             expected_m,
         )
 
-        down_input = (F.silu(gate_output.float()) * up_output.float()).to(
-            torch.bfloat16
+        from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_masked_fwd
+
+        down_input = torch.empty(
+            (
+                gateup_output.shape[0],
+                gateup_output.shape[1],
+                gateup_output.shape[2] // 2,
+            ),
+            device=gateup_output.device,
+            dtype=torch.bfloat16,
         )
-        del gate_output, up_output
+        silu_and_mul_masked_fwd(gateup_output, down_input, masked_m)
+        del gateup_output
 
         down_output = _grouped_masked_gemm(
             down_input,
@@ -158,7 +160,10 @@ def load_sparse_gemm_moe_weight(
     if manifest_path.is_dir():
         manifest_path = manifest_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    logical_name = f"model.layers.{layer_id}.mlp.experts.{projection}.weight"
+    if projection == "w13_weight":
+        logical_name = f"model.layers.{layer_id}.mlp.experts.w13_weight"
+    else:
+        logical_name = f"model.layers.{layer_id}.mlp.experts.{projection}.weight"
     for entry in manifest["weights"]:
         if entry["logical_name"] != logical_name:
             continue
@@ -215,7 +220,7 @@ def pre_permute_standard_to_sparse_gemm(
 
     output_dtype = (
         torch.bfloat16
-        if quant_info.w13_weight.dtype == torch.bfloat16
+        if quant_info.dense_w13.dtype == torch.bfloat16
         else torch.float8_e4m3fn
     )
     masked_m, expected_m, src2dst, packed_hidden_states, hidden_states_scale = (
