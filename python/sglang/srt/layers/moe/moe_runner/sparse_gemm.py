@@ -150,6 +150,8 @@ def load_sparse_gemm_moe_weight(
     layer_id: int,
     projection: str,
     device: torch.device,
+    expert_start: int = 0,
+    num_local_experts: Optional[int] = None,
 ) -> object:
     manifest_root = os.environ.get(_SPARSE_GEMM_MOE_PATH_ENV)
     if not manifest_root:
@@ -169,27 +171,51 @@ def load_sparse_gemm_moe_weight(
             continue
         payload_path = manifest_path.parent / entry["file"]
         payload = torch.load(payload_path, map_location="cpu", weights_only=True)
-        return _payload_to_sparse_weight(payload, device)
+        return _payload_to_sparse_weight(
+            payload,
+            device,
+            expert_start=expert_start,
+            num_local_experts=num_local_experts,
+        )
     raise KeyError(f"{logical_name} not found in {manifest_path}")
 
 
-def _payload_to_sparse_weight(payload: dict, device: torch.device) -> object:
+def _payload_to_sparse_weight(
+    payload: dict,
+    device: torch.device,
+    *,
+    expert_start: int = 0,
+    num_local_experts: Optional[int] = None,
+) -> object:
     from sparse_gemm.hybrid_sparse import (
         HybridBlockSparseLayout,
         HybridBlockSparseWeight,
     )
 
+    global_experts = payload["original_shape"][0]
+    if num_local_experts is None:
+        num_local_experts = global_experts
+    expert_end = expert_start + num_local_experts
+    if expert_start < 0 or expert_end > global_experts:
+        raise ValueError(
+            f"invalid local expert range [{expert_start}, {expert_end}) for "
+            f"SparseGEMM weight with {global_experts} experts"
+        )
+
+    def local(name: str) -> torch.Tensor:
+        return payload[name][expert_start:expert_end]
+
     def move(name: str) -> torch.Tensor:
-        return payload[name].to(device=device, non_blocking=True).contiguous()
+        return local(name).to(device=device, non_blocking=True).contiguous()
 
     hardware_metadata = payload["hardware_metadata"]
     if hardware_metadata is not None:
-        hardware_metadata = hardware_metadata.to(
+        hardware_metadata = local("hardware_metadata").to(
             device=device, non_blocking=True
         ).contiguous()
 
     return HybridBlockSparseWeight(
-        original_shape=tuple(payload["original_shape"]),
+        original_shape=(num_local_experts, *payload["original_shape"][1:]),
         layout=HybridBlockSparseLayout(**payload["layout"]),
         block_selector=move("block_selector"),
         dense_values=move("dense_values"),

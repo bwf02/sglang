@@ -418,11 +418,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 layer_id=layer.layer_id,
                 projection="w13_weight",
                 device=device,
+                expert_start=layer.moe_ep_rank * layer.num_local_experts,
+                num_local_experts=layer.num_local_experts,
             )
             layer.sparse_gemm_down_weight = load_sparse_gemm_moe_weight(
                 layer_id=layer.layer_id,
                 projection="down_proj",
                 device=device,
+                expert_start=layer.moe_ep_rank * layer.num_local_experts,
+                num_local_experts=layer.num_local_experts,
             )
 
         return
