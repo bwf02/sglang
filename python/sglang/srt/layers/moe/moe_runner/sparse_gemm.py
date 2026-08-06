@@ -81,18 +81,11 @@ class SparseGemmRunnerCore(MoeRunnerCore):
         if masked_m is None:
             raise ValueError("masked_m is required for SparseGEMM masked grouped GEMM")
 
-        dispatch_m = expected_m
-        if hidden_states.shape[1] > 256:
-            # Large-capacity prefill batches can be heavily imbalanced across
-            # EP ranks. Synchronize once and reuse the rank-local maximum for
-            # both grouped GEMMs instead of dispatching from global capacity.
-            dispatch_m = max(1, int(masked_m.amax().item()))
-
         gateup_output = _grouped_masked_gemm(
             hidden_states,
             quant_info.w13_weight,
             masked_m,
-            dispatch_m,
+            expected_m,
         )
 
         from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_masked_fwd
@@ -113,7 +106,7 @@ class SparseGemmRunnerCore(MoeRunnerCore):
             down_input,
             quant_info.down_weight,
             masked_m,
-            dispatch_m,
+            expected_m,
         )
         return down_output
 
