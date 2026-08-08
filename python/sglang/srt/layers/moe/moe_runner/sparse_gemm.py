@@ -27,6 +27,15 @@ from sglang.srt.layers.moe.utils import MoeRunnerBackend
 
 _SPARSE_GEMM_MOE_PATH_ENV = "SGLANG_SPARSE_GEMM_MOE_PATH"
 _SPARSE_GEMM_KERNEL_ENV = "SGLANG_SPARSE_GEMM_KERNEL"
+_SPARSE_GEMM_LAYOUT_ENV = "SGLANG_SPARSE_GEMM_LAYOUT"
+_SPARSE_GEMM_M_ALIGNMENT_ENV = "SGLANG_SPARSE_GEMM_M_ALIGNMENT"
+_SPARSE_GEMM_CONTIGUOUS_MIN_M_ENV = "SGLANG_SPARSE_GEMM_CONTIGUOUS_MIN_M"
+
+
+@dataclass
+class SparseGemmRunnerInput(DeepGemmRunnerInput):
+    grouped_layout: Optional[torch.Tensor] = None
+    m_alignment: int = 128
 
 
 @dataclass
@@ -61,11 +70,14 @@ class SparseGemmRunnerCore(MoeRunnerCore):
             raise TypeError("SparseGEMM runner expects DeepGEMM-style input")
         if not isinstance(quant_info, SparseGemmMoeQuantInfo):
             raise TypeError("SparseGEMM runner expects SparseGemmMoeQuantInfo")
-        if not runner_input.use_masked_gemm:
-            raise NotImplementedError(
-                "SparseGEMM MoE currently supports the masked grouped path only"
-            )
-        hidden_states = self._run_masked_bf16_gemm(runner_input, quant_info)
+        if runner_input.use_masked_gemm:
+            hidden_states = self._run_masked_bf16_gemm(runner_input, quant_info)
+        else:
+            if not isinstance(runner_input, SparseGemmRunnerInput):
+                raise TypeError(
+                    "SparseGEMM contiguous path expects SparseGemmRunnerInput"
+                )
+            hidden_states = self._run_contiguous_bf16_gemm(runner_input, quant_info)
         return DeepGemmRunnerOutput(hidden_states=hidden_states)
 
     def _run_masked_bf16_gemm(
@@ -110,6 +122,39 @@ class SparseGemmRunnerCore(MoeRunnerCore):
         )
         return down_output
 
+    def _run_contiguous_bf16_gemm(
+        self,
+        runner_input: SparseGemmRunnerInput,
+        quant_info: SparseGemmMoeQuantInfo,
+    ) -> torch.Tensor:
+        hidden_states = runner_input.hidden_states
+        grouped_layout = runner_input.grouped_layout
+        m_alignment = runner_input.m_alignment
+        if hidden_states.dtype != torch.bfloat16:
+            raise TypeError("SparseGEMM MoE currently expects BF16 activations")
+        if grouped_layout is None:
+            raise ValueError("grouped_layout is required for contiguous SparseGEMM")
+
+        gateup_output = _grouped_contiguous_gemm(
+            hidden_states,
+            quant_info.w13_weight,
+            grouped_layout,
+            m_alignment,
+        )
+
+        from sglang.jit_kernel.activation import silu_and_mul
+
+        down_input = silu_and_mul(gateup_output)
+        del gateup_output
+
+        down_output = _grouped_contiguous_gemm(
+            down_input,
+            quant_info.down_weight,
+            grouped_layout,
+            m_alignment,
+        )
+        return down_output
+
     @property
     def runner_backend(self) -> MoeRunnerBackend:
         return MoeRunnerBackend.SPARSE_GEMM
@@ -140,6 +185,38 @@ def _grouped_masked_gemm(
         from sparse_gemm.hybrid_sparse import hybrid_block_sparse_grouped_masked_ref
 
         return hybrid_block_sparse_grouped_masked_ref(activation, packed_weight, masked_m)
+    raise ValueError(
+        f"{_SPARSE_GEMM_KERNEL_ENV} must be one of 'wgmma_tma', 'naive', or 'ref'"
+    )
+
+
+def _grouped_contiguous_gemm(
+    activation: torch.Tensor,
+    packed_weight: object,
+    grouped_layout: torch.Tensor,
+    m_alignment: int,
+) -> torch.Tensor:
+    kernel = os.environ.get(_SPARSE_GEMM_KERNEL_ENV, "wgmma_tma")
+    if kernel == "wgmma_tma":
+        from sparse_gemm.hybrid_sparse import (
+            hybrid_block_sparse_grouped_contiguous_wgmma_tma,
+        )
+
+        return hybrid_block_sparse_grouped_contiguous_wgmma_tma(
+            activation, packed_weight, grouped_layout, m_alignment
+        )
+    if kernel == "naive":
+        from sparse_gemm.hybrid_sparse import hybrid_block_sparse_grouped_contiguous_naive
+
+        return hybrid_block_sparse_grouped_contiguous_naive(
+            activation, packed_weight, grouped_layout, m_alignment
+        )
+    if kernel == "ref":
+        from sparse_gemm.hybrid_sparse import hybrid_block_sparse_grouped_contiguous_ref
+
+        return hybrid_block_sparse_grouped_contiguous_ref(
+            activation, packed_weight, grouped_layout, m_alignment
+        )
     raise ValueError(
         f"{_SPARSE_GEMM_KERNEL_ENV} must be one of 'wgmma_tma', 'naive', or 'ref'"
     )
@@ -232,7 +309,10 @@ def pre_permute_standard_to_sparse_gemm(
     runner_config: MoeRunnerConfig,
     running_state: dict,
 ) -> DeepGemmRunnerInput:
-    from sglang.srt.layers.moe.ep_moe.kernels import moe_ep_deepgemm_preprocess
+    from sglang.srt.layers.moe.ep_moe.kernels import (
+        moe_ep_deepgemm_preprocess,
+        moe_ep_sparse_gemm_contiguous_preprocess,
+    )
 
     hidden_states, topk_output = (
         dispatch_output.hidden_states,
@@ -249,16 +329,51 @@ def pre_permute_standard_to_sparse_gemm(
         if quant_info.dense_w13.dtype == torch.bfloat16
         else torch.float8_e4m3fn
     )
-    masked_m, expected_m, src2dst, packed_hidden_states, hidden_states_scale = (
-        moe_ep_deepgemm_preprocess(
-            topk_ids,
-            runner_config.num_local_experts,
-            hidden_states,
-            runner_config.top_k,
-            quant_info.block_shape,
-            output_dtype=output_dtype,
+    layout = os.environ.get(_SPARSE_GEMM_LAYOUT_ENV, "auto")
+    if layout == "auto":
+        contiguous_min_m = int(os.environ.get(_SPARSE_GEMM_CONTIGUOUS_MIN_M_ENV, "4096"))
+        use_contiguous = topk_ids.numel() >= contiguous_min_m
+    elif layout == "contiguous":
+        use_contiguous = True
+    elif layout == "masked":
+        use_contiguous = False
+    else:
+        raise ValueError(
+            f"{_SPARSE_GEMM_LAYOUT_ENV} must be 'auto', 'masked', or 'contiguous'"
         )
-    )
+
+    if use_contiguous:
+        if output_dtype != torch.bfloat16:
+            raise TypeError("SparseGEMM contiguous layout currently supports BF16 only")
+        m_alignment = int(os.environ.get(_SPARSE_GEMM_M_ALIGNMENT_ENV, "128"))
+        grouped_layout, m_alignment, src2dst, packed_hidden_states = (
+            moe_ep_sparse_gemm_contiguous_preprocess(
+                topk_ids,
+                runner_config.num_local_experts,
+                hidden_states,
+                runner_config.top_k,
+                m_alignment=m_alignment,
+                output_dtype=output_dtype,
+            )
+        )
+        hidden_states_scale = None
+        masked_m = None
+        expected_m = None
+        use_masked_gemm = False
+    else:
+        masked_m, expected_m, src2dst, packed_hidden_states, hidden_states_scale = (
+            moe_ep_deepgemm_preprocess(
+                topk_ids,
+                runner_config.num_local_experts,
+                hidden_states,
+                runner_config.top_k,
+                quant_info.block_shape,
+                output_dtype=output_dtype,
+            )
+        )
+        grouped_layout = None
+        m_alignment = 128
+        use_masked_gemm = True
 
     running_state["topk_ids"] = topk_ids
     running_state["topk_weights"] = topk_weights
@@ -267,12 +382,14 @@ def pre_permute_standard_to_sparse_gemm(
     running_state["hidden_states_device"] = hidden_states_device
     running_state["src2dst"] = src2dst
 
-    return DeepGemmRunnerInput(
+    return SparseGemmRunnerInput(
         hidden_states=packed_hidden_states,
         hidden_states_scale=hidden_states_scale,
-        use_masked_gemm=True,
+        use_masked_gemm=use_masked_gemm,
         masked_m=masked_m,
         expected_m=expected_m,
+        grouped_layout=grouped_layout,
+        m_alignment=m_alignment,
     )
 
 

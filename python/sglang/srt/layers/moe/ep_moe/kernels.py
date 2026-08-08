@@ -1129,6 +1129,51 @@ def deepgemm_compute_src2dst_triton_kernel(
 
 
 @triton.jit
+def contiguous_grouped_layout_triton_kernel(
+    seg_indptr,
+    grouped_layout,
+    NUM_EXPERTS: tl.constexpr,
+    M_ALIGNMENT: tl.constexpr,
+):
+    previous_end = tl.full((), 0, tl.int64)
+    for expert_id in range(NUM_EXPERTS):
+        start = tl.load(seg_indptr + expert_id)
+        end = tl.load(seg_indptr + expert_id + 1)
+        count = end - start
+        aligned_start = (previous_end + M_ALIGNMENT - 1) // M_ALIGNMENT * M_ALIGNMENT
+        current_end = aligned_start + count
+        tl.store(grouped_layout + expert_id, current_end.to(tl.int32))
+        previous_end = current_end
+
+
+@triton.jit
+def contiguous_compute_src2dst_triton_kernel(
+    topk_ids,
+    reorder_ids,
+    seg_indptr,
+    grouped_layout,
+    src2dst,
+    num_toks,
+    BLOCK_SIZE: tl.constexpr,
+    M_ALIGNMENT: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    sorted_dst_id = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = sorted_dst_id < num_toks
+    src_id = tl.load(reorder_ids + sorted_dst_id, mask=mask)
+    expert_id = tl.load(topk_ids + src_id, mask=mask)
+    valid_expert = mask & (expert_id >= 0)
+    previous_end = tl.load(
+        grouped_layout + expert_id - 1, mask=valid_expert & (expert_id > 0), other=0
+    )
+    expert_start = (previous_end + M_ALIGNMENT - 1) // M_ALIGNMENT * M_ALIGNMENT
+    expert_seg_start = tl.load(seg_indptr + expert_id, mask=valid_expert)
+    expert_dst_offset = sorted_dst_id - expert_seg_start
+    dst_id = expert_start + expert_dst_offset
+    tl.store(src2dst + src_id, dst_id.to(tl.int32), mask=valid_expert)
+
+
+@triton.jit
 def fill_gateup_input_triton_kernel(
     input_ptr,
     scale_ptr,
@@ -1253,6 +1298,74 @@ def moe_ep_deepgemm_preprocess(
         gateup_input,
         gateup_input_scale,
     )
+
+
+def moe_ep_sparse_gemm_contiguous_preprocess(
+    topk_ids: torch.Tensor,
+    num_local_experts: int,
+    hidden_states: torch.Tensor,
+    top_k: int,
+    m_alignment: int = 128,
+    output_dtype: torch.dtype = torch.bfloat16,
+):
+    assert output_dtype == torch.bfloat16
+    reorder_topk_ids, reorder_ids = torch.sort(topk_ids.view(-1), stable=True)
+    seg_indptr = torch.zeros(
+        num_local_experts + 1, device=topk_ids.device, dtype=torch.int64
+    )
+    src2dst = torch.empty(topk_ids.numel(), device=topk_ids.device, dtype=torch.int32)
+    src2dst.fill_(-1)
+    grouped_layout = torch.empty(
+        num_local_experts, device=topk_ids.device, dtype=torch.int32
+    )
+
+    compute_seg_indptr_triton_kernel[(num_local_experts + 1,)](
+        reorder_topk_ids, seg_indptr, topk_ids.numel()
+    )
+    contiguous_grouped_layout_triton_kernel[(1,)](
+        seg_indptr,
+        grouped_layout,
+        NUM_EXPERTS=num_local_experts,
+        M_ALIGNMENT=m_alignment,
+    )
+
+    grid = lambda meta: (triton.cdiv(topk_ids.numel(), meta["BLOCK_SIZE"]),)
+    contiguous_compute_src2dst_triton_kernel[grid](
+        topk_ids,
+        reorder_ids,
+        seg_indptr,
+        grouped_layout,
+        src2dst,
+        topk_ids.numel(),
+        BLOCK_SIZE=256,
+        M_ALIGNMENT=m_alignment,
+    )
+
+    total_m_capacity = triton.cdiv(
+        topk_ids.numel() + num_local_experts * (m_alignment - 1),
+        m_alignment,
+    ) * m_alignment
+    gateup_input = torch.empty(
+        (total_m_capacity, hidden_states.size(1)),
+        device=hidden_states.device,
+        dtype=output_dtype,
+    )
+
+    fill_gateup_input_triton_kernel[(hidden_states.shape[0],)](
+        hidden_states,
+        None,
+        gateup_input,
+        None,
+        src2dst,
+        topk_ids,
+        top_k,
+        hidden_states.size(1),
+        0,
+        BLOCK_SIZE=1024,
+        IS_FP8=False,
+    )
+
+    return grouped_layout, m_alignment, src2dst, gateup_input
 
 
 @triton.jit
