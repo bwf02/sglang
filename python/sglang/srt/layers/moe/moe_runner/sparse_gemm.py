@@ -332,6 +332,8 @@ def pre_permute_standard_to_sparse_gemm(
     layout = os.environ.get(_SPARSE_GEMM_LAYOUT_ENV, "auto")
     if layout == "auto":
         contiguous_min_m = int(os.environ.get(_SPARSE_GEMM_CONTIGUOUS_MIN_M_ENV, "4096"))
+        if contiguous_min_m < 0:
+            raise ValueError(f"{_SPARSE_GEMM_CONTIGUOUS_MIN_M_ENV} must be >= 0")
         use_contiguous = topk_ids.numel() >= contiguous_min_m
     elif layout == "contiguous":
         use_contiguous = True
@@ -346,6 +348,10 @@ def pre_permute_standard_to_sparse_gemm(
         if output_dtype != torch.bfloat16:
             raise TypeError("SparseGEMM contiguous layout currently supports BF16 only")
         m_alignment = int(os.environ.get(_SPARSE_GEMM_M_ALIGNMENT_ENV, "128"))
+        if m_alignment <= 0 or m_alignment % 64 != 0:
+            raise ValueError(
+                f"{_SPARSE_GEMM_M_ALIGNMENT_ENV} must be positive and divisible by 64"
+            )
         grouped_layout, m_alignment, src2dst, packed_hidden_states = (
             moe_ep_sparse_gemm_contiguous_preprocess(
                 topk_ids,
