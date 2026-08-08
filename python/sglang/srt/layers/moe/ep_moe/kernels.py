@@ -1225,6 +1225,7 @@ def moe_ep_deepgemm_preprocess(
     top_k: int,
     block_shape,
     output_dtype: torch.dtype = torch.float8_e4m3fn,
+    m_alignment: int = 256,
 ):
     reorder_topk_ids, reorder_ids = torch.sort(topk_ids.view(-1), stable=True)
     seg_indptr = torch.zeros(
@@ -1240,8 +1241,17 @@ def moe_ep_deepgemm_preprocess(
     grid = lambda meta: (triton.cdiv(topk_ids.numel(), meta["BLOCK_SIZE"]),)
     compute_masked_m_triton_kernel[(num_local_experts,)](seg_indptr, masked_m)
 
-    # For masked grouped GEMM, shape M should be multiple of the block M (current block M: {block_m}) https://github.com/deepseek-ai/DeepGEMM/blob/main/deep_gemm/jit_kernels/m_grouped_gemm.py#L165
-    m_max = (hidden_states.size(0) // 256 + 1) * 256
+    if m_alignment <= 0 or m_alignment % 64 != 0:
+        raise ValueError("m_alignment must be positive and divisible by 64")
+    # For masked grouped GEMM, per-expert capacity must be block-M aligned.
+    # Keep DeepGEMM's historical 256-row overpadding by default; SparseGEMM
+    # passes 64/128 explicitly to hit its small-M grouped kernels during decode.
+    if m_alignment == 256:
+        m_max = (hidden_states.size(0) // 256 + 1) * 256
+    else:
+        m_max = (
+            (hidden_states.size(0) + m_alignment - 1) // m_alignment
+        ) * m_alignment
     expected_m = (topk_ids.numel() - 1) // num_local_experts + 1
     gateup_input = torch.empty(
         (num_local_experts, m_max, hidden_states.size(1)),

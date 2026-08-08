@@ -29,6 +29,7 @@ _SPARSE_GEMM_MOE_PATH_ENV = "SGLANG_SPARSE_GEMM_MOE_PATH"
 _SPARSE_GEMM_KERNEL_ENV = "SGLANG_SPARSE_GEMM_KERNEL"
 _SPARSE_GEMM_LAYOUT_ENV = "SGLANG_SPARSE_GEMM_LAYOUT"
 _SPARSE_GEMM_M_ALIGNMENT_ENV = "SGLANG_SPARSE_GEMM_M_ALIGNMENT"
+_SPARSE_GEMM_MASKED_M_ALIGNMENT_ENV = "SGLANG_SPARSE_GEMM_MASKED_M_ALIGNMENT"
 _SPARSE_GEMM_CONTIGUOUS_MIN_M_ENV = "SGLANG_SPARSE_GEMM_CONTIGUOUS_MIN_M"
 
 
@@ -367,6 +368,14 @@ def pre_permute_standard_to_sparse_gemm(
         expected_m = None
         use_masked_gemm = False
     else:
+        masked_m_alignment = int(
+            os.environ.get(_SPARSE_GEMM_MASKED_M_ALIGNMENT_ENV, "64")
+        )
+        if masked_m_alignment <= 0 or masked_m_alignment % 64 != 0:
+            raise ValueError(
+                f"{_SPARSE_GEMM_MASKED_M_ALIGNMENT_ENV} must be positive and "
+                "divisible by 64"
+            )
         masked_m, expected_m, src2dst, packed_hidden_states, hidden_states_scale = (
             moe_ep_deepgemm_preprocess(
                 topk_ids,
@@ -375,6 +384,7 @@ def pre_permute_standard_to_sparse_gemm(
                 runner_config.top_k,
                 quant_info.block_shape,
                 output_dtype=output_dtype,
+                m_alignment=masked_m_alignment,
             )
         )
         grouped_layout = None
