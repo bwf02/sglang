@@ -443,6 +443,7 @@ def _silu_and_mul_kernel(
     stride_output_2,
     masked_m_ptr,
     size_n,
+    output_column_offset,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
 ):
@@ -461,7 +462,12 @@ def _silu_and_mul_kernel(
 
     offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
     input_ptr_offs = input_ptr + expert_id * stride_input_0 + offs_in_d
-    output_ptr_offs = output_ptr + expert_id * stride_output_0 + offs_in_d
+    output_ptr_offs = (
+        output_ptr
+        + expert_id * stride_output_0
+        + output_column_offset
+        + offs_in_d
+    )
 
     for token_index in tl.range(
         token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
@@ -534,9 +540,94 @@ def silu_and_mul_masked_fwd(
         *output.stride(),
         masked_m,
         size_n,
+        0,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
         num_warps=num_warps,
+    )
+    return output
+
+
+def silu_and_mul_masked_padded_fwd(
+    input: torch.Tensor,
+    masked_m: torch.Tensor,
+    padded_n: int,
+    left_padding: int,
+) -> torch.Tensor:
+    size_n = input.shape[-1] // 2
+    output = torch.zeros(
+        (*input.shape[:-1], padded_n),
+        device=input.device,
+        dtype=input.dtype,
+    )
+    expert_num = len(masked_m)
+    block_num_per_expert = 64 if expert_num < 4 else 32
+    block_n = 128
+    grid = (triton.cdiv(size_n, block_n), block_num_per_expert, expert_num)
+    _silu_and_mul_kernel[grid](
+        input,
+        *input.stride(),
+        output,
+        *output.stride(),
+        masked_m,
+        size_n,
+        left_padding,
+        BLOCK_N=block_n,
+        NUM_STAGE=4,
+        num_warps=4,
+    )
+    return output
+
+
+@triton.jit
+def _silu_and_mul_padded_kernel(
+    input_ptr,
+    output_ptr,
+    output_numel,
+    size_n: tl.constexpr,
+    padded_n: tl.constexpr,
+    left_padding: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    output_offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    output_valid = output_offsets < output_numel
+    rows = output_offsets // padded_n
+    columns = output_offsets - rows * padded_n
+    input_columns = columns - left_padding
+    input_valid = output_valid & (input_columns >= 0) & (input_columns < size_n)
+    input_rows = input_ptr + rows * size_n * 2
+    gate = tl.load(input_rows + input_columns, mask=input_valid, other=0.0).to(
+        tl.float32
+    )
+    up = tl.load(
+        input_rows + size_n + input_columns, mask=input_valid, other=0.0
+    ).to(tl.float32)
+    result = tl.where(input_valid, up * gate / (1 + tl.exp(-gate)), 0.0)
+    tl.store(output_ptr + output_offsets, result, mask=output_valid)
+
+
+def silu_and_mul_padded_fwd(
+    input: torch.Tensor,
+    padded_n: int,
+    left_padding: int,
+) -> torch.Tensor:
+    assert input.is_contiguous() and input.dtype == torch.bfloat16
+    assert input.dim() == 2 and input.shape[-1] % 2 == 0
+    size_n = input.shape[-1] // 2
+    assert 0 <= left_padding <= padded_n - size_n
+    output = torch.empty(
+        (input.shape[0], padded_n), device=input.device, dtype=input.dtype
+    )
+    block_size = 1024
+    _silu_and_mul_padded_kernel[(triton.cdiv(output.numel(), block_size),)](
+        input,
+        output,
+        output.numel(),
+        size_n,
+        padded_n,
+        left_padding,
+        BLOCK_SIZE=block_size,
+        num_warps=8,
     )
     return output
 

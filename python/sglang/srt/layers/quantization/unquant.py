@@ -420,6 +420,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 device=device,
                 expert_start=layer.moe_ep_rank * layer.num_local_experts,
                 num_local_experts=layer.num_local_experts,
+                moe_tp_rank=layer.moe_tp_rank,
+                moe_tp_size=layer.moe_tp_size,
             )
             layer.sparse_gemm_down_weight = load_sparse_gemm_moe_weight(
                 layer_id=layer.layer_id,
@@ -427,6 +429,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 device=device,
                 expert_start=layer.moe_ep_rank * layer.num_local_experts,
                 num_local_experts=layer.num_local_experts,
+                moe_tp_rank=layer.moe_tp_rank,
+                moe_tp_size=layer.moe_tp_size,
             )
 
         return
@@ -587,6 +591,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 w13_weight=layer.sparse_gemm_w13_weight,
                 down_weight=layer.sparse_gemm_down_weight,
                 dense_w13_weight=layer.w13_weight,
+                moe_tp_rank=layer.moe_tp_rank,
             )
             return self.runner.run(dispatch_output, quant_info)
         elif self.use_flashinfer_cutlass:

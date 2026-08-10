@@ -19,6 +19,7 @@
 """Inference-only Qwen2MoE model compatible with HuggingFace weights."""
 
 import logging
+import os
 from contextlib import nullcontext
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -205,6 +206,13 @@ class Qwen2MoeMLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
+        self.sparse_gate_up_weight = None
+        self.sparse_down_weight = None
+
+    def set_sparse_gemm_weights(self, gate_up_weight, down_weight) -> None:
+        self.sparse_gate_up_weight = gate_up_weight
+        self.sparse_down_weight = down_weight
+        self.forward = self.forward_sparse_gemm
 
     def forward(
         self,
@@ -218,6 +226,41 @@ class Qwen2MoeMLP(nn.Module):
             x, skip_all_reduce=should_allreduce_fusion or use_reduce_scatter
         )
         return x
+
+    def forward_sparse_gemm(
+        self,
+        x,
+        should_allreduce_fusion: bool = False,
+        use_reduce_scatter: bool = False,
+    ):
+        sparse_min_m = int(
+            os.environ.get("SGLANG_SPARSE_GEMM_SHARED_MIN_M", "4096")
+        )
+        if sparse_min_m < 0:
+            raise ValueError("SGLANG_SPARSE_GEMM_SHARED_MIN_M must be >= 0")
+        if (
+            self.sparse_gate_up_weight is not None
+            and self.sparse_down_weight is not None
+            and x.shape[0] >= sparse_min_m
+        ):
+            from sparse_gemm.hybrid_sparse import (
+                hybrid_block_sparse_gemm_wgmma_tuned,
+            )
+
+            gate_up = hybrid_block_sparse_gemm_wgmma_tuned(
+                x, self.sparse_gate_up_weight
+            )
+            x = self.act_fn(gate_up)
+            return hybrid_block_sparse_gemm_wgmma_tuned(
+                x, self.sparse_down_weight
+            )
+
+        return Qwen2MoeMLP.forward(
+            self,
+            x,
+            should_allreduce_fusion=should_allreduce_fusion,
+            use_reduce_scatter=use_reduce_scatter,
+        )
 
 
 class Qwen2MoeSparseMoeBlock(nn.Module):
@@ -1183,6 +1226,37 @@ class Qwen2MoeForCausalLM(nn.Module):
                         weight_loader(param, loaded_weight)
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
+
+        sparse_manifest = os.environ.get("SGLANG_SPARSE_GEMM_MOE_PATH")
+        if sparse_manifest:
+            from sglang.srt.layers.moe.moe_runner.sparse_gemm import (
+                load_sparse_gemm_shared_weight,
+            )
+
+            tp_rank = get_parallel().tp_rank
+            tp_size = get_parallel().tp_size
+            for layer_id in range(self.model.start_layer, self.model.end_layer):
+                shared_expert = self.model.layers[layer_id].mlp.shared_expert
+                if shared_expert is None:
+                    continue
+                device = shared_expert.gate_up_proj.weight.device
+                gate_up_weight = load_sparse_gemm_shared_weight(
+                    layer_id=layer_id,
+                    projection="gate_up_proj",
+                    device=device,
+                    tp_rank=tp_rank,
+                    tp_size=tp_size,
+                )
+                down_weight = load_sparse_gemm_shared_weight(
+                    layer_id=layer_id,
+                    projection="down_proj",
+                    device=device,
+                    tp_rank=tp_rank,
+                    tp_size=tp_size,
+                )
+                shared_expert.set_sparse_gemm_weights(
+                    gate_up_weight, down_weight
+                )
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):
