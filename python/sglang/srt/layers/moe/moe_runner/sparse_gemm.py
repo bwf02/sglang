@@ -163,7 +163,7 @@ class SparseGemmRunnerCore(MoeRunnerCore):
         from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_padded_fwd
 
         actual_columns = gateup_output.shape[1] // 2
-        left, _ = quant_info.down_input_padding(actual_columns)
+        left, right = quant_info.down_input_padding(actual_columns)
         down_input = silu_and_mul_padded_fwd(
             gateup_output,
             quant_info.down_weight.original_shape[-1],
@@ -176,6 +176,11 @@ class SparseGemmRunnerCore(MoeRunnerCore):
             quant_info.down_weight,
             grouped_layout,
             m_alignment,
+            active_tail_block=(
+                left // quant_info.down_weight.layout.block_w
+                if left + right == quant_info.down_weight.layout.block_w
+                else -1
+            ),
         )
         return down_output
 
@@ -219,6 +224,7 @@ def _grouped_contiguous_gemm(
     packed_weight: object,
     grouped_layout: torch.Tensor,
     m_alignment: int,
+    active_tail_block: int = -1,
 ) -> torch.Tensor:
     kernel = os.environ.get(_SPARSE_GEMM_KERNEL_ENV, "wgmma_tma")
     if kernel == "wgmma_tma":
@@ -227,7 +233,11 @@ def _grouped_contiguous_gemm(
         )
 
         return hybrid_block_sparse_grouped_contiguous_wgmma_tma(
-            activation, packed_weight, grouped_layout, m_alignment
+            activation,
+            packed_weight,
+            grouped_layout,
+            m_alignment,
+            active_tail_block=active_tail_block,
         )
     if kernel == "naive":
         from sparse_gemm.hybrid_sparse import hybrid_block_sparse_grouped_contiguous_naive

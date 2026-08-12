@@ -116,6 +116,9 @@ from sglang.srt.runtime_context import get_stream
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 _SGLANG_EXPERIMENTAL_LORA_OPTI = envs.SGLANG_EXPERIMENTAL_LORA_OPTI.get()
+_SGLANG_MOE_PREFILL_DUAL_STREAM = get_bool_env_var(
+    "SGLANG_MOE_PREFILL_DUAL_STREAM"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -610,7 +613,13 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
             final_hidden_states = self.experts(hidden_states, topk_output)
-        elif self.alt_stream is not None and get_is_capture_mode():
+        elif self.alt_stream is not None and (
+            get_is_capture_mode()
+            or (
+                _SGLANG_MOE_PREFILL_DUAL_STREAM
+                and hidden_states.shape[0] >= 4096
+            )
+        ):
             final_hidden_states, shared_output = self.forward_normal_dual_stream(
                 hidden_states, use_fused_gate=use_fused_gate
             )
