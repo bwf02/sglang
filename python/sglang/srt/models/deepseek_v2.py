@@ -552,7 +552,10 @@ class DeepseekV2MoE(nn.Module):
         n_shared_experts = (
             0 if config.n_shared_experts is None else int(config.n_shared_experts)
         )
-        _fusion_disabled = get_server_args().disable_shared_experts_fusion
+        _fusion_disabled = (
+            get_server_args().disable_shared_experts_fusion
+            or get_moe_runner_backend().is_sparse_gemm()
+        )
 
         # num_fused_shared_experts drives weight remapping in deepseek_weight_loader:
         # mlp.shared_experts → mlp.experts.256 when > 0.
@@ -2765,7 +2768,10 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
         self.num_fused_shared_experts = 0
         server_args = get_server_args()
 
-        if get_server_args().disable_shared_experts_fusion:
+        if (
+            get_server_args().disable_shared_experts_fusion
+            or get_moe_runner_backend().is_sparse_gemm()
+        ):
             return
 
         disable_reason = None

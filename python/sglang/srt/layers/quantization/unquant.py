@@ -80,6 +80,11 @@ _cutedsl_bf16_gemm = None
 _use_cutedsl_bf16_gemm = None
 
 
+def _discard_sparse_gemm_moe_weight(*args, **kwargs) -> None:
+    """Consume dense checkpoint expert tensors without storing them."""
+    return None
+
+
 def initialize_bf16_gemm_config(server_args: ServerArgs) -> None:
     global _BF16_GEMM_BACKEND, _cutedsl_bf16_gemm, _use_cutedsl_bf16_gemm
 
@@ -249,6 +254,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         **extra_weight_attrs,
     ):
         self.with_bias = with_bias
+
+        if self.use_sparse_gemm:
+            sparse_weight_attrs = dict(extra_weight_attrs)
+            sparse_weight_attrs["weight_loader"] = _discard_sparse_gemm_moe_weight
+            for name in ("w13_weight", "w2_weight"):
+                weight = torch.nn.Parameter(
+                    torch.empty(0, dtype=params_dtype), requires_grad=False
+                )
+                layer.register_parameter(name, weight)
+                set_weight_attrs(weight, sparse_weight_attrs)
+            if self.with_bias:
+                for name in ("w13_weight_bias", "w2_weight_bias"):
+                    bias = torch.nn.Parameter(
+                        torch.empty(0, dtype=torch.float32), requires_grad=False
+                    )
+                    layer.register_parameter(name, bias)
+                    set_weight_attrs(bias, sparse_weight_attrs)
+            return
 
         # Fused gate_up_proj (column parallel)
         w13_up_dim = (
@@ -422,6 +445,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 num_local_experts=layer.num_local_experts,
                 moe_tp_rank=layer.moe_tp_rank,
                 moe_tp_size=layer.moe_tp_size,
+                num_global_experts=layer.num_experts,
             )
             layer.sparse_gemm_down_weight = load_sparse_gemm_moe_weight(
                 layer_id=layer.layer_id,
@@ -431,6 +455,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 num_local_experts=layer.num_local_experts,
                 moe_tp_rank=layer.moe_tp_rank,
                 moe_tp_size=layer.moe_tp_size,
+                num_global_experts=layer.num_experts,
             )
 
         return
@@ -590,7 +615,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             quant_info = SparseGemmMoeQuantInfo(
                 w13_weight=layer.sparse_gemm_w13_weight,
                 down_weight=layer.sparse_gemm_down_weight,
-                dense_w13_weight=layer.w13_weight,
+                output_dtype=layer.w13_weight.dtype,
                 moe_tp_rank=layer.moe_tp_rank,
             )
             return self.runner.run(dispatch_output, quant_info)

@@ -42,16 +42,9 @@ class SparseGemmRunnerInput(DeepGemmRunnerInput):
 class SparseGemmMoeQuantInfo(MoeQuantInfo):
     w13_weight: object
     down_weight: object
-    dense_w13_weight: torch.Tensor
+    output_dtype: torch.dtype = torch.bfloat16
     moe_tp_rank: int = 0
     block_shape: Optional[list[int]] = None
-
-    @property
-    def dense_w13(self) -> torch.Tensor:
-        # The standard->DeepGEMM pre-permute path only needs dtype/device and
-        # block_shape from quant_info. SparseGEMM keeps the real sparse w13
-        # payload separately because the preprocess only needs dense metadata.
-        return self.dense_w13_weight
 
     def down_input_padding(self, actual_columns: int) -> tuple[int, int]:
         padded_columns = self.down_weight.original_shape[-1]
@@ -265,6 +258,7 @@ def load_sparse_gemm_moe_weight(
     num_local_experts: Optional[int] = None,
     moe_tp_rank: int = 0,
     moe_tp_size: int = 1,
+    num_global_experts: Optional[int] = None,
 ) -> object:
     manifest_root = os.environ.get(_SPARSE_GEMM_MOE_PATH_ENV)
     if not manifest_root:
@@ -284,6 +278,14 @@ def load_sparse_gemm_moe_weight(
             continue
         payload_path = manifest_path.parent / entry["file"]
         payload = torch.load(payload_path, map_location="cpu", weights_only=True)
+        if (
+            num_global_experts is not None
+            and payload["original_shape"][0] != num_global_experts
+        ):
+            raise ValueError(
+                f"{logical_name} contains {payload['original_shape'][0]} experts, "
+                f"but the SGLang layer expects {num_global_experts}"
+            )
         return _payload_to_sparse_weight(
             payload,
             device,
@@ -586,7 +588,7 @@ def pre_permute_standard_to_sparse_gemm(
 
     output_dtype = (
         torch.bfloat16
-        if quant_info.dense_w13.dtype == torch.bfloat16
+        if quant_info.output_dtype == torch.bfloat16
         else torch.float8_e4m3fn
     )
     layout = os.environ.get(_SPARSE_GEMM_LAYOUT_ENV, "auto")
