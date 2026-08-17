@@ -2,8 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import ModuleType
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -85,6 +84,8 @@ class TestSparseGemmUnquantizedWeights(unittest.TestCase):
         sparse_module = ModuleType("sparse_gemm.hybrid_sparse")
         sparse_module.HybridBlockSparseLayout = FakeLayout
         sparse_module.HybridBlockSparseWeight = FakeWeight
+        sparse_package = ModuleType("sparse_gemm")
+        sparse_package.hybrid_sparse = sparse_module
         payload = {
             "original_shape": [1, 64, 1408],
             "layout": {"block_h": 64, "block_w": 64, "block_n": 1, "block_m": 2},
@@ -96,7 +97,11 @@ class TestSparseGemmUnquantizedWeights(unittest.TestCase):
         }
 
         with patch.dict(
-            "sys.modules", {"sparse_gemm.hybrid_sparse": sparse_module}
+            "sys.modules",
+            {
+                "sparse_gemm": sparse_package,
+                "sparse_gemm.hybrid_sparse": sparse_module,
+            },
         ):
             rank0 = _payload_to_sparse_weight(
                 payload,
