@@ -2,11 +2,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
 from sglang.srt.layers.moe.moe_runner.sparse_gemm import (
+    SparseGemmMoeQuantInfo,
+    _payload_to_sparse_weight,
     load_sparse_gemm_moe_weight,
 )
 from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
@@ -68,6 +72,60 @@ class TestSparseGemmUnquantizedWeights(unittest.TestCase):
                         device=torch.device("cpu"),
                         num_global_experts=64,
                     )
+
+    def test_tp2_down_shard_pads_odd_eleven_block_partition(self):
+        class FakeLayout:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class FakeWeight:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        sparse_module = ModuleType("sparse_gemm.hybrid_sparse")
+        sparse_module.HybridBlockSparseLayout = FakeLayout
+        sparse_module.HybridBlockSparseWeight = FakeWeight
+        payload = {
+            "original_shape": [1, 64, 1408],
+            "layout": {"block_h": 64, "block_w": 64, "block_n": 1, "block_m": 2},
+            "block_selector": torch.zeros(1, 1, 11, dtype=torch.int32),
+            "dense_values": torch.ones(1, 1, 11, 2, 1),
+            "sparse_values": torch.ones(1, 1, 11, 2, 1),
+            "sparse_metadata": torch.zeros(1, 1, 11, 2, 1),
+            "hardware_metadata": None,
+        }
+
+        with patch.dict(
+            "sys.modules", {"sparse_gemm.hybrid_sparse": sparse_module}
+        ):
+            rank0 = _payload_to_sparse_weight(
+                payload,
+                torch.device("cpu"),
+                projection="down_proj",
+                moe_tp_rank=0,
+                moe_tp_size=2,
+            )
+            rank1 = _payload_to_sparse_weight(
+                payload,
+                torch.device("cpu"),
+                projection="down_proj",
+                moe_tp_rank=1,
+                moe_tp_size=2,
+            )
+
+        self.assertEqual(rank0.original_shape, (1, 64, 768))
+        self.assertEqual(rank1.original_shape, (1, 64, 768))
+        self.assertTrue(torch.equal(rank0.dense_values[0, 0, -1, 1], torch.zeros(1)))
+        self.assertTrue(torch.equal(rank1.dense_values[0, 0, 0, 0], torch.zeros(1)))
+
+        down = SimpleNamespace(
+            original_shape=(1, 64, 768),
+            layout=SimpleNamespace(block_w=64, block_m=2),
+        )
+        rank0_info = SparseGemmMoeQuantInfo(None, down, moe_tp_rank=0)
+        rank1_info = SparseGemmMoeQuantInfo(None, down, moe_tp_rank=1)
+        self.assertEqual(rank0_info.down_input_padding(704), (0, 64))
+        self.assertEqual(rank1_info.down_input_padding(704), (64, 0))
 
 
 if __name__ == "__main__":
