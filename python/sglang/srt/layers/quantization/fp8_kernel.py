@@ -28,7 +28,7 @@ try:
 except:
     pass
 
-from sglang.jit_kernel.utils import is_arch_support_pdl
+from sglang.jit_kernel.utils import is_triton_pdl_supported
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.utils import (
     ceil_align,
@@ -852,7 +852,11 @@ def static_quant_fp8(
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
-    pdl_kwargs = {"USE_PDL": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+    pdl_kwargs = (
+        {"USE_PDL": True, "launch_pdl": True}
+        if is_triton_pdl_supported()
+        else {}
+    )
     _static_quant_fp8[(M,)](
         x,
         x_q,

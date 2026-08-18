@@ -11,7 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.jit_kernel.utils import is_arch_support_pdl
+from sglang.jit_kernel.utils import is_triton_pdl_supported
 
 
 @triton.jit
@@ -222,7 +222,7 @@ def mla_kv_pack_quantize_fp8(
         v_out = torch.empty((s, num_heads, v_head), dtype=fp8_dtype, device=v.device)
 
     if enable_pdl is None:
-        enable_pdl = is_arch_support_pdl()
+        enable_pdl = is_triton_pdl_supported()
 
     fp8_tl_dtype = _FP8_DTYPE_MAP[fp8_dtype]
     kernel_choice, cfg = _pick_kernel(s, num_heads)

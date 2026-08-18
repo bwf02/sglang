@@ -10,7 +10,7 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.jit_kernel.utils import is_arch_support_pdl
+from sglang.jit_kernel.utils import is_triton_pdl_supported
 
 PAD_SLOT_ID = -1
 
@@ -1133,7 +1133,11 @@ def causal_conv1d_update(
     else:
         stride_retrieve_parent_token_seq = stride_retrieve_parent_token_token = 0
 
-    pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+    pdl_kwargs = (
+        {"USE_GDC": True, "launch_pdl": True}
+        if is_triton_pdl_supported()
+        else {}
+    )
 
     _causal_conv1d_update_kernel[grid](
         # Pointers to matrices

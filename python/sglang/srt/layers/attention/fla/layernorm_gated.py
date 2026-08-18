@@ -15,7 +15,7 @@ import triton
 import triton.language as tl
 from einops import rearrange
 
-from sglang.jit_kernel.utils import is_arch_support_pdl
+from sglang.jit_kernel.utils import is_triton_pdl_supported
 from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
 from sglang.srt.model_executor.cuda_graph_config import (
     Backend,
@@ -254,7 +254,11 @@ def _layer_norm_fwd(
     rows_per_block = calc_rows_per_block(M, x.device)
     # Update grid to use rows_per_block
     grid = (cdiv(M, rows_per_block), ngroups)
-    pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+    pdl_kwargs = (
+        {"USE_GDC": True, "launch_pdl": True}
+        if is_triton_pdl_supported()
+        else {}
+    )
     # Workaround for PyTorch <= 2.12: torch.xpu.device is not Dynamo-compatible
     # in that release — it creates a DynamoConfigPatchProxy that
     # SourcelessBuilder cannot wrap, causing a hard error under

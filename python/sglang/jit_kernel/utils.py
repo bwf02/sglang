@@ -580,5 +580,6 @@ __all__ = [
     "override_jit_cuda_arch",
     "get_jit_cuda_arch",
     "is_arch_support_pdl",
+    "is_triton_pdl_supported",
     "register_dependency",
 ]

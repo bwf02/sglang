@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 
-from sglang.jit_kernel.utils import is_arch_support_pdl
+from sglang.jit_kernel.utils import is_triton_pdl_supported
 
 
 def get_pdl_launch_metadata() -> tuple[bool, dict]:
@@ -10,7 +10,7 @@ def get_pdl_launch_metadata() -> tuple[bool, dict]:
     ``launch_pdl`` is NVIDIA-only Triton launch metadata; the HIP backend
     rejects unknown kwargs, so it is only included when PDL is supported.
     """
-    enable_pdl = is_arch_support_pdl()
+    enable_pdl = is_triton_pdl_supported()
     return enable_pdl, ({"launch_pdl": True} if enable_pdl else {})
 
 

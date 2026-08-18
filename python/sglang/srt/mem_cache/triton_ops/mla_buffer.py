@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.jit_kernel.utils import is_arch_support_pdl
+from sglang.jit_kernel.utils import is_arch_support_pdl, is_triton_pdl_supported
 from sglang.srt.layers.dcp import (
     dcp_enabled,
     get_attention_dcp_rank,
@@ -149,7 +149,11 @@ def set_mla_kv_buffer_triton(
     total_dim = nope_dim + rope_dim
     BLOCK = triton.next_power_of_2(total_dim)
     grid = (n_loc, 1)
-    pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+    pdl_kwargs = (
+        {"USE_GDC": True, "launch_pdl": True}
+        if is_triton_pdl_supported()
+        else {}
+    )
     set_mla_kv_buffer_kernel[grid](
         kv_buffer,
         cache_k_nope,
@@ -247,7 +251,11 @@ def set_mla_kv_buffer_triton_fp8_quant(
     n_loc = loc.numel()
     grid = (n_loc, triton.cdiv(total_dim, BLOCK))
 
-    pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+    pdl_kwargs = (
+        {"USE_GDC": True, "launch_pdl": True}
+        if is_triton_pdl_supported()
+        else {}
+    )
 
     set_mla_kv_buffer_fp8_quant_kernel[grid](
         kv_buffer_fp8,
