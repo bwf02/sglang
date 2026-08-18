@@ -14,6 +14,7 @@
 
 """Inference-only Ernie4.5 model compatible with baidu/ERNIE-4.5-*-PT weights."""
 
+import os
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -39,13 +40,54 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.deepseek_v2 import DeepseekV2MLP as Ernie4MLP
+from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
 from sglang.srt.models.llama import LlamaAttention as Ernie4Attention
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import add_prefix, is_npu, make_layers
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 _is_npu = is_npu()
+
+
+class Ernie4MLP(DeepseekV2MLP):
+    def set_sparse_gemm_weights(self, gate_up_weight, down_weight) -> None:
+        self.sparse_gate_up_weight = gate_up_weight
+        self.sparse_down_weight = down_weight
+
+    def forward(
+        self,
+        x,
+        forward_batch=None,
+        should_allreduce_fusion: bool = False,
+        use_reduce_scatter: bool = False,
+        gemm_output_zero_allocator=None,
+    ):
+        sparse_min_m = int(
+            os.environ.get("SGLANG_SPARSE_GEMM_SHARED_MIN_M", "4096")
+        )
+        if sparse_min_m < 0:
+            raise ValueError("SGLANG_SPARSE_GEMM_SHARED_MIN_M must be >= 0")
+        if (
+            hasattr(self, "sparse_gate_up_weight")
+            and x.shape[0] >= sparse_min_m
+        ):
+            from sparse_gemm.hybrid_sparse import (
+                hybrid_block_sparse_gemm_wgmma_tuned,
+            )
+
+            gate_up = hybrid_block_sparse_gemm_wgmma_tuned(
+                x, self.sparse_gate_up_weight
+            )
+            return hybrid_block_sparse_gemm_wgmma_tuned(
+                self.act_fn(gate_up), self.sparse_down_weight
+            )
+        return super().forward(
+            x,
+            forward_batch=forward_batch,
+            should_allreduce_fusion=should_allreduce_fusion,
+            use_reduce_scatter=use_reduce_scatter,
+            gemm_output_zero_allocator=gemm_output_zero_allocator,
+        )
 
 
 class MoEGate(nn.Module):
@@ -428,6 +470,38 @@ class Ernie4_5_MoeForCausalLM(Ernie4_5_ForCausalLM):
                         weight_loader(param, loaded_weight)
                     else:
                         raise KeyError(f"Parameter '{name}' not found in model.")
+
+        if os.environ.get("SGLANG_SPARSE_GEMM_MOE_PATH"):
+            from sglang.srt.layers.moe.moe_runner.sparse_gemm import (
+                load_sparse_gemm_shared_weight,
+            )
+
+            tp_rank = get_parallel().tp_rank
+            tp_size = get_parallel().tp_size
+            for layer in self.model.layers:
+                if not isinstance(layer.mlp, Ernie4Moe):
+                    continue
+                shared_experts = getattr(layer.mlp, "shared_experts", None)
+                if shared_experts is None:
+                    continue
+                device = shared_experts.gate_up_proj.weight.device
+                gate_up_weight = load_sparse_gemm_shared_weight(
+                    layer_id=layer.mlp.layer_id,
+                    projection="gate_up_proj",
+                    device=device,
+                    tp_rank=tp_rank,
+                    tp_size=tp_size,
+                )
+                down_weight = load_sparse_gemm_shared_weight(
+                    layer_id=layer.mlp.layer_id,
+                    projection="down_proj",
+                    device=device,
+                    tp_rank=tp_rank,
+                    tp_size=tp_size,
+                )
+                shared_experts.set_sparse_gemm_weights(
+                    gate_up_weight, down_weight
+                )
 
 
 EntryClass = [Ernie4_5_MoeForCausalLM, Ernie4_5_ForCausalLM]

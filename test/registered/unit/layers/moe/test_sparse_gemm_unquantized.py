@@ -9,6 +9,7 @@ import torch
 
 from sglang.srt.layers.moe.moe_runner.sparse_gemm import (
     SparseGemmMoeQuantInfo,
+    _payload_to_sparse_shared_weight,
     _payload_to_sparse_weight,
     load_sparse_gemm_moe_weight,
 )
@@ -196,6 +197,67 @@ class TestSparseGemmUnquantizedWeights(unittest.TestCase):
         rank1_info = SparseGemmMoeQuantInfo(None, down, moe_tp_rank=1)
         self.assertEqual(rank0_info.down_input_padding(704), (0, 64))
         self.assertEqual(rank1_info.down_input_padding(704), (64, 0))
+
+    def test_tp2_shared_expert_shards_preserve_gate_up_and_down_layouts(self):
+        class FakeLayout:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class FakeWeight:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        sparse_module = ModuleType("sparse_gemm.hybrid_sparse")
+        sparse_module.HybridBlockSparseLayout = FakeLayout
+        sparse_module.HybridBlockSparseWeight = FakeWeight
+        sparse_package = ModuleType("sparse_gemm")
+        sparse_package.hybrid_sparse = sparse_module
+        layout = {"block_h": 4, "block_w": 4, "block_n": 1, "block_m": 2}
+        gate_up_payload = {
+            "original_shape": [32, 8],
+            "layout": layout,
+            "block_selector": torch.arange(8).reshape(8, 1),
+            "dense_values": torch.arange(8).reshape(8, 1),
+            "sparse_values": torch.arange(8).reshape(8, 1),
+            "sparse_metadata": torch.arange(8).reshape(8, 1),
+            "hardware_metadata": None,
+        }
+        down_payload = {
+            "original_shape": [8, 16],
+            "layout": layout,
+            "block_selector": torch.arange(4).reshape(2, 2),
+            "dense_values": torch.arange(4).reshape(2, 2),
+            "sparse_values": torch.arange(4).reshape(2, 2),
+            "sparse_metadata": torch.arange(4).reshape(2, 2),
+            "hardware_metadata": None,
+        }
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "sparse_gemm": sparse_package,
+                "sparse_gemm.hybrid_sparse": sparse_module,
+            },
+        ):
+            gate_up = _payload_to_sparse_shared_weight(
+                gate_up_payload,
+                torch.device("cpu"),
+                projection="gate_up_proj",
+                tp_rank=1,
+                tp_size=2,
+            )
+            down = _payload_to_sparse_shared_weight(
+                down_payload,
+                torch.device("cpu"),
+                projection="down_proj",
+                tp_rank=1,
+                tp_size=2,
+            )
+
+        self.assertEqual(gate_up.original_shape, (16, 8))
+        self.assertEqual(gate_up.block_selector[:, 0].tolist(), [2, 3, 6, 7])
+        self.assertEqual(down.original_shape, (8, 8))
+        self.assertEqual(down.block_selector[:, 0].tolist(), [1, 3])
 
 
 if __name__ == "__main__":
