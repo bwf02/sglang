@@ -16,6 +16,71 @@ from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
 
 
 class TestSparseGemmUnquantizedWeights(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_topk_one_masked_preprocess(self):
+        from sglang.srt.layers.moe.ep_moe.kernels import (
+            moe_ep_deepgemm_preprocess,
+        )
+
+        hidden_states = torch.arange(
+            128, device="cuda", dtype=torch.bfloat16
+        ).reshape(1, 128)
+        topk_ids = torch.tensor([[3]], device="cuda", dtype=torch.int32)
+
+        masked_m, expected_m, src2dst, packed, scale = moe_ep_deepgemm_preprocess(
+            topk_ids,
+            num_local_experts=4,
+            hidden_states=hidden_states,
+            top_k=1,
+            block_shape=None,
+            output_dtype=torch.bfloat16,
+            m_alignment=64,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(expected_m, 1)
+        self.assertIsNone(scale)
+        self.assertEqual(tuple(packed.shape), (4, 64, 128))
+        self.assertEqual(masked_m.tolist(), [0, 0, 0, 1])
+        torch.testing.assert_close(
+            packed.view(-1, 128)[src2dst.long()], hidden_states
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_topk_many_masked_preprocess(self):
+        from sglang.srt.layers.moe.ep_moe.kernels import (
+            moe_ep_deepgemm_preprocess,
+        )
+
+        hidden_states = torch.arange(
+            2 * 128, device="cuda", dtype=torch.bfloat16
+        ).reshape(2, 128)
+        topk_ids = torch.tensor(
+            [list(range(8)), list(reversed(range(8)))],
+            device="cuda",
+            dtype=torch.int32,
+        )
+
+        masked_m, expected_m, src2dst, packed, scale = moe_ep_deepgemm_preprocess(
+            topk_ids,
+            num_local_experts=8,
+            hidden_states=hidden_states,
+            top_k=8,
+            block_shape=None,
+            output_dtype=torch.bfloat16,
+            m_alignment=64,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(expected_m, 2)
+        self.assertIsNone(scale)
+        self.assertEqual(tuple(packed.shape), (8, 64, 128))
+        self.assertEqual(masked_m.tolist(), [2] * 8)
+        torch.testing.assert_close(
+            packed.view(-1, 128)[src2dst.long()],
+            hidden_states.repeat_interleave(8, dim=0),
+        )
+
     def test_create_weights_uses_zero_size_checkpoint_sinks(self):
         layer = torch.nn.Module()
         method = UnquantizedFusedMoEMethod()

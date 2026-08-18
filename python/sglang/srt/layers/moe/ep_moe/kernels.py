@@ -1272,7 +1272,7 @@ def fill_gateup_input_triton_kernel(
     gateup_input_scale_ptr,
     src2dst_ptr,
     topk_ids_ptr,
-    topk,
+    topk: tl.constexpr,
     hidden_size,
     scale_size,
     BLOCK_SIZE: tl.constexpr,
@@ -1281,8 +1281,12 @@ def fill_gateup_input_triton_kernel(
 
     src_idx_int32 = tl.program_id(0)
     src_idx = src_idx_int32.to(tl.int64)
-    src2dst_ptr = src2dst_ptr + src_idx * topk
-    topk_ids_ptr = topk_ids_ptr + src_idx * topk
+    if topk == 1:
+        src2dst_ptr = src2dst_ptr + src_idx
+        topk_ids_ptr = topk_ids_ptr + src_idx
+    else:
+        src2dst_ptr = src2dst_ptr + src_idx * topk
+        topk_ids_ptr = topk_ids_ptr + src_idx * topk
     src_ptr = input_ptr + src_idx * hidden_size
     if IS_FP8:
         scale_src_ptr = scale_ptr + src_idx * scale_size
