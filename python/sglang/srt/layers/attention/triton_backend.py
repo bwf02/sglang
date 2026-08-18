@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 import triton
 
+from sglang.jit_kernel.utils import is_triton_pdl_supported
 from sglang.srt.configs.model_config import AttentionArch
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
@@ -47,9 +48,6 @@ from sglang.srt.utils import (
 _is_cuda = is_cuda()
 _is_gfx942 = is_gfx942_supported()
 _is_xpu = is_xpu()
-
-if _is_cuda:
-    from sgl_kernel.utils import is_arch_support_pdl
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -214,7 +212,7 @@ class TritonAttnBackend(AttentionBackend):
                 # ROCm graph replay; pin to 256 to match validated gfx950 behavior.
                 self.max_kv_splits = min(self.max_kv_splits, 256)
         if _is_cuda:
-            self.use_pdl = is_arch_support_pdl()
+            self.use_pdl = is_triton_pdl_supported()
         else:
             self.use_pdl = False
 

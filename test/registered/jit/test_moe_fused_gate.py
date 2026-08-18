@@ -15,6 +15,8 @@ tie-break choice) does not matter.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import sys
 from typing import Tuple
 
@@ -29,6 +31,38 @@ from sglang.test.ci.ci_register import register_cuda_ci
 register_cuda_ci(est_time=8, stage="base-b-kernel-unit", runner_config="1-gpu-large")
 
 DEVICE = "cuda"
+
+
+@pytest.mark.parametrize(
+    ("parameters", "expected"),
+    [
+        (
+            {
+                "_semantic": inspect.Parameter(
+                    "_semantic", inspect.Parameter.KEYWORD_ONLY
+                )
+            },
+            True,
+        ),
+        (
+            {
+                "_builder": inspect.Parameter(
+                    "_builder", inspect.Parameter.KEYWORD_ONLY
+                )
+            },
+            False,
+        ),
+    ],
+)
+def test_triton_pdl_requires_semantic_compatible_gdc_wait(
+    monkeypatch: pytest.MonkeyPatch, parameters, expected
+) -> None:
+    module = importlib.import_module("sglang.jit_kernel.utils")
+    monkeypatch.setattr(module, "is_arch_support_pdl", lambda: True)
+    monkeypatch.setattr(
+        module.inspect, "signature", lambda _: inspect.Signature(parameters.values())
+    )
+    assert module.is_triton_pdl_supported.__wrapped__() is expected
 
 
 def _scatter_by_expert(

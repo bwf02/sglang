@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.jit_kernel.utils import cache_once, is_arch_support_pdl, load_jit
+from sglang.jit_kernel.utils import cache_once, is_triton_pdl_supported, load_jit
 from sglang.kernel_api_logging import debug_kernel_api
 
 if TYPE_CHECKING:
@@ -309,7 +309,7 @@ def moe_fused_gate(
     BLOCK_M = max(1, min(4, 256 // BLOCK_N))
     num_warps = 1
     grid = (triton.cdiv(M, BLOCK_M),)
-    use_pdl = is_arch_support_pdl()
+    use_pdl = is_triton_pdl_supported()
     extra = {"launch_pdl": True} if use_pdl else {}
     _router_triton_kernel[grid](
         scores,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import importlib.util
+import inspect
 import logging
 import os
 import pathlib
@@ -420,6 +421,19 @@ def is_arch_support_pdl() -> bool:
     if is_hip_runtime() or is_musa_runtime():
         return False
     return get_jit_cuda_arch().major >= 9
+
+
+@cache_once
+def is_triton_pdl_supported() -> bool:
+    if not is_arch_support_pdl():
+        return False
+    try:
+        import triton.language as tl
+
+        externs = (tl.extra.cuda.gdc_wait, tl.extra.cuda.gdc_launch_dependents)
+        return all("_semantic" in inspect.signature(fn).parameters for fn in externs)
+    except (AttributeError, ImportError, TypeError, ValueError):
+        return False
 
 
 def _find_package_root(package: str) -> Optional[pathlib.Path]:
