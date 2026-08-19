@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import nullcontext
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -288,6 +289,12 @@ class DeepseekV2MLP(nn.Module):
         self._fused_clamp_fp8_checked = False
         self._fused_clamp_use_fp8 = False
 
+    def set_sparse_gemm_weights(self, gate_up_weight, down_weight) -> None:
+        if self.swiglu_limit is not None:
+            raise ValueError("SparseGEMM shared experts do not support SwiGLU limits")
+        self.sparse_gate_up_weight = gate_up_weight
+        self.sparse_down_weight = down_weight
+
     def forward(
         self,
         x,
@@ -296,6 +303,26 @@ class DeepseekV2MLP(nn.Module):
         use_reduce_scatter: bool = False,
         gemm_output_zero_allocator: BumpAllocator = None,
     ):
+        sparse_min_m = int(
+            os.environ.get("SGLANG_SPARSE_GEMM_SHARED_MIN_M", "4096")
+        )
+        if sparse_min_m < 0:
+            raise ValueError("SGLANG_SPARSE_GEMM_SHARED_MIN_M must be >= 0")
+        if (
+            hasattr(self, "sparse_gate_up_weight")
+            and x.shape[0] >= sparse_min_m
+        ):
+            from sparse_gemm.hybrid_sparse import (
+                hybrid_block_sparse_gemm_wgmma_tuned,
+            )
+
+            gate_up = hybrid_block_sparse_gemm_wgmma_tuned(
+                x, self.sparse_gate_up_weight
+            )
+            return hybrid_block_sparse_gemm_wgmma_tuned(
+                self.act_fn(gate_up), self.sparse_down_weight
+            )
+
         if (self.tp_size == 1) and x.shape[0] == 0:
             return x
 
@@ -2899,6 +2926,41 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False):
         self.do_load_weights(weights, is_nextn)
+
+        if os.environ.get("SGLANG_SPARSE_GEMM_MOE_PATH"):
+            from sglang.srt.layers.moe.moe_runner.sparse_gemm import (
+                load_sparse_gemm_shared_weight,
+            )
+
+            tp_rank = get_parallel().tp_rank
+            tp_size = get_parallel().tp_size
+            for layer_id in range(self.model.start_layer, self.model.end_layer):
+                mlp = self.model.layers[layer_id].mlp
+                if not isinstance(mlp, DeepseekV2MoE):
+                    continue
+                shared_experts = getattr(mlp, "shared_experts", None)
+                if shared_experts is None:
+                    continue
+                shared_tp_rank = 0 if mlp._shared_expert_tp1 else tp_rank
+                shared_tp_size = 1 if mlp._shared_expert_tp1 else tp_size
+                device = shared_experts.gate_up_proj.weight.device
+                gate_up_weight = load_sparse_gemm_shared_weight(
+                    layer_id=layer_id,
+                    projection="gate_up_proj",
+                    device=device,
+                    tp_rank=shared_tp_rank,
+                    tp_size=shared_tp_size,
+                )
+                down_weight = load_sparse_gemm_shared_weight(
+                    layer_id=layer_id,
+                    projection="down_proj",
+                    device=device,
+                    tp_rank=shared_tp_rank,
+                    tp_size=shared_tp_size,
+                )
+                shared_experts.set_sparse_gemm_weights(
+                    gate_up_weight, down_weight
+                )
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight
