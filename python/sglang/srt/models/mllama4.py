@@ -718,6 +718,7 @@ class Llama4ForConditionalGeneration(nn.Module):
             logger.warning(
                 f"Some weights are not initialized from checkpoints {unloaded_params}"
             )
+        self.language_model.bind_sparse_gemm_shared_experts()
 
     def _should_skip_weight(self, name: str) -> bool:
         """Check if we should skip loading this weight."""

@@ -626,6 +626,9 @@ class Llama4ForCausalLM(LlamaForCausalLM):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         super().load_weights(weights)
+        self.bind_sparse_gemm_shared_experts()
+
+    def bind_sparse_gemm_shared_experts(self) -> None:
         if not os.environ.get("SGLANG_SPARSE_GEMM_MOE_PATH"):
             return
 
