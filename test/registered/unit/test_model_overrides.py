@@ -1053,6 +1053,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
             _deterministic_allreduce_fusion_disable,
             _enforce_disable_allreduce_fusion,
             _flashinfer_allreduce_fusion_auto_enable,
+            _sparse_gemm_allreduce_fusion_disable,
         )
 
         def _view(arch="Qwen3MoeForCausalLM", **kw):
@@ -1063,6 +1064,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                 enable_dp_attention=False,
                 nnodes=1,
                 moe_a2a_backend="none",
+                moe_runner_backend="deep_gemm",
                 enforce_disable_flashinfer_allreduce_fusion=False,
                 enable_deterministic_inference=False,
             )
@@ -1114,6 +1116,17 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                 ),
                 {},
             )
+
+        self.assertEqual(
+            _sparse_gemm_allreduce_fusion_disable(
+                _view(
+                    moe_runner_backend="sparse_gemm",
+                    flashinfer_allreduce_fusion_backend="auto",
+                )
+            ),
+            {"flashinfer_allreduce_fusion_backend": None},
+        )
+        self.assertEqual(_sparse_gemm_allreduce_fusion_disable(_view()), {})
 
         # enforce-disable wins over everything
         self.assertEqual(

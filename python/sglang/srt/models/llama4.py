@@ -19,7 +19,8 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union
+import os
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -67,6 +68,45 @@ _is_cuda = is_cuda()
 _is_npu = is_npu()
 
 logger = logging.getLogger(__name__)
+
+
+class Llama4SharedExpert(LlamaMLP):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sparse_gate_up_weight = None
+        self.sparse_down_weight = None
+
+    def set_sparse_gemm_weights(self, gate_up_weight, down_weight) -> None:
+        self.sparse_gate_up_weight = gate_up_weight
+        self.sparse_down_weight = down_weight
+
+    def forward(
+        self,
+        x,
+        forward_batch=None,
+        use_reduce_scatter: bool = False,
+    ):
+        sparse_min_m = int(
+            os.environ.get("SGLANG_SPARSE_GEMM_SHARED_MIN_M", "4096")
+        )
+        if sparse_min_m < 0:
+            raise ValueError("SGLANG_SPARSE_GEMM_SHARED_MIN_M must be >= 0")
+        if (
+            self.sparse_gate_up_weight is not None
+            and self.sparse_down_weight is not None
+            and x.shape[0] >= sparse_min_m
+        ):
+            from sparse_gemm.hybrid_sparse import (
+                hybrid_block_sparse_gemm_wgmma_tuned,
+            )
+
+            gate_up = hybrid_block_sparse_gemm_wgmma_tuned(
+                x, self.sparse_gate_up_weight
+            )
+            return hybrid_block_sparse_gemm_wgmma_tuned(
+                self.act_fn(gate_up), self.sparse_down_weight
+            )
+        return super().forward(x, forward_batch, use_reduce_scatter)
 
 
 class Llama4MoE(nn.Module):
@@ -126,7 +166,7 @@ class Llama4MoE(nn.Module):
             prefix=add_prefix("experts", prefix),
         )
 
-        self.shared_expert = LlamaMLP(
+        self.shared_expert = Llama4SharedExpert(
             hidden_size=config.hidden_size,
             intermediate_size=intermediate_size_moe,
             hidden_act="silu",
@@ -583,6 +623,39 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         prefix: str = "",
     ):
         return Llama4Model(config, quant_config=quant_config, prefix=prefix)
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        super().load_weights(weights)
+        if not os.environ.get("SGLANG_SPARSE_GEMM_MOE_PATH"):
+            return
+
+        from sglang.srt.layers.moe.moe_runner.sparse_gemm import (
+            load_sparse_gemm_shared_weight,
+        )
+
+        tp_rank = get_parallel().tp_rank
+        tp_size = get_parallel().tp_size
+        for layer_id, layer in enumerate(self.model.layers):
+            feed_forward = getattr(layer, "feed_forward", None)
+            if not isinstance(feed_forward, Llama4MoE):
+                continue
+            shared_expert = feed_forward.shared_expert
+            device = shared_expert.gate_up_proj.weight.device
+            gate_up_weight = load_sparse_gemm_shared_weight(
+                layer_id=layer_id,
+                projection="gate_up_proj",
+                device=device,
+                tp_rank=tp_rank,
+                tp_size=tp_size,
+            )
+            down_weight = load_sparse_gemm_shared_weight(
+                layer_id=layer_id,
+                projection="down_proj",
+                device=device,
+                tp_rank=tp_rank,
+                tp_size=tp_size,
+            )
+            shared_expert.set_sparse_gemm_weights(gate_up_weight, down_weight)
 
 
 EntryClass = [Llama4ForCausalLM]

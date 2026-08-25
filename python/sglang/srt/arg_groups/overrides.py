@@ -1424,6 +1424,19 @@ def _flashinfer_allreduce_fusion_auto_enable(view: Any) -> dict:
 
 
 @register_post_process
+def _sparse_gemm_allreduce_fusion_disable(view: Any) -> dict:
+    if (
+        view.moe_runner_backend == "sparse_gemm"
+        and view.flashinfer_allreduce_fusion_backend is not None
+    ):
+        logger.info(
+            "FlashInfer allreduce fusion is disabled for the SparseGEMM MoE backend."
+        )
+        return {"flashinfer_allreduce_fusion_backend": None}
+    return {}
+
+
+@register_post_process
 def _enforce_disable_allreduce_fusion(view: Any) -> dict:
     """Slot pass right after the auto-enable: the user's enforce-disable
     switch wins over every model-specific adjustment."""

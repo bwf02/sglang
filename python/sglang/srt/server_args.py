@@ -4533,9 +4533,11 @@ class ServerArgs:
         from sglang.srt.arg_groups.overrides import (
             _enforce_disable_allreduce_fusion,
             _flashinfer_allreduce_fusion_auto_enable,
+            _sparse_gemm_allreduce_fusion_disable,
         )
 
         run_post_process_pass(self, _flashinfer_allreduce_fusion_auto_enable)
+        run_post_process_pass(self, _sparse_gemm_allreduce_fusion_disable)
         run_post_process_pass(self, _enforce_disable_allreduce_fusion)
 
     def _support_mamba_cache_extra_buffer(self, model_arch: str):
