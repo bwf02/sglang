@@ -600,6 +600,12 @@ def pre_permute_standard_to_deep_gemm(
     )
     topk_weights, topk_ids, _ = topk_output
 
+    top_k = runner_config.top_k
+    if top_k is None:
+        if topk_ids.ndim != 2:
+            raise ValueError("topk_ids must be 2D when top_k is not configured")
+        top_k = topk_ids.shape[1]
+
     hidden_states_shape = hidden_states.shape
     hidden_states_dtype = hidden_states.dtype
     hidden_states_device = hidden_states.device
@@ -618,7 +624,7 @@ def pre_permute_standard_to_deep_gemm(
             topk_ids,
             runner_config.num_local_experts,
             hidden_states,
-            runner_config.top_k,
+            top_k,
             quant_info.block_shape,
             output_dtype=output_dtype,
             batched_capacity=quant_info.slidesparse_projections is not None,
@@ -660,6 +666,11 @@ def post_permute_deep_gemm_to_standard(
     src2dst = running_state["src2dst"]
     topk_ids = running_state["topk_ids"]
     topk_weights = running_state["topk_weights"]
+    top_k = runner_config.top_k
+    if top_k is None:
+        if topk_ids.ndim != 2:
+            raise ValueError("topk_ids must be 2D when top_k is not configured")
+        top_k = topk_ids.shape[1]
 
     output = torch.empty(
         hidden_states_shape, dtype=hidden_states_dtype, device=hidden_states_device
@@ -670,7 +681,7 @@ def post_permute_deep_gemm_to_standard(
         src2dst,
         topk_ids,
         topk_weights,
-        runner_config.top_k,
+        top_k,
         hidden_states_shape[1],
         BLOCK_SIZE=512,
     )

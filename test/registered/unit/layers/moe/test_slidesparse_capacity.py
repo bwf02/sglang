@@ -10,6 +10,26 @@ from sglang.srt.layers.moe.ep_moe.kernels import moe_ep_deepgemm_preprocess
 
 @unittest.skipUnless(torch.cuda.is_available(), "Requires CUDA")
 class SlideSparseCapacityTest(unittest.TestCase):
+    def test_unspecified_topk_round_trip(self):
+        from sglang.srt.layers.moe.moe_runner.deep_gemm import (
+            pre_permute_standard_to_deep_gemm,
+            post_permute_deep_gemm_to_standard,
+        )
+
+        x = torch.randn(8, 128, device="cuda", dtype=torch.bfloat16)
+        ids = (torch.arange(16, device="cuda", dtype=torch.int32) % 4).view(8, 2)
+        weights = torch.full((8, 2), 0.5, device="cuda")
+        config = SimpleNamespace(top_k=None, num_local_experts=4, inplace=False,
+                                 routed_scaling_factor=None)
+        quant = SimpleNamespace(w13_weight=x, block_shape=None, slidesparse_projections=(True, True))
+        state = {}
+        packed = pre_permute_standard_to_deep_gemm(
+            SimpleNamespace(hidden_states=x, topk_output=(weights, ids, None)),
+            quant, config, state,
+        )
+        combined = post_permute_deep_gemm_to_standard(packed, quant, config, state)
+        torch.testing.assert_close(combined.hidden_states, x)
+
     def test_shared_row_parallel_down_projection(self):
         from unittest.mock import patch
         from sglang.srt.layers.linear import RowParallelLinear
