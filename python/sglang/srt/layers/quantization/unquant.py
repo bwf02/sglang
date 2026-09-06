@@ -194,7 +194,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 layer.weight.unsqueeze(0), offload_source=True
             )
             layer.weight.data = self.slidesparse_projection.weight[0]
-            logger.info("SlideSparse 25% shared projection: %s", ".".join(prefix))
+            logger.info("SlideSparse 25%% shared projection: %s", ".".join(prefix))
 
     def apply(
         self,
