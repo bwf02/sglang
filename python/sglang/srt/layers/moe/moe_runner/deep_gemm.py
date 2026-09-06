@@ -506,12 +506,14 @@ class DeepGemmRunnerCore(MoeRunnerCore):
 
         gate_up, down = quant_info.slidesparse_projections
         gateup_output = gate_up(runner_input.hidden_states)
+        dispose_tensor(runner_input.hidden_states)
         # Invalid expert rows must be initialized before cuSPARSELt reads them.
         down_input = torch.zeros(
             (*gateup_output.shape[:2], gateup_output.shape[2] // 2),
             dtype=gateup_output.dtype, device=gateup_output.device,
         )
         silu_and_mul_masked_fwd(gateup_output, down_input, runner_input.masked_m)
+        del gateup_output
         return down(down_input)
 
     def _run_masked_bf16_gemm(
