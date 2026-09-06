@@ -458,6 +458,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 num_global_experts=layer.num_experts,
             )
 
+        if get_bool_env_var("SGLANG_SLIDESPARSE_BASELINE"):
+            if not self.use_deep_gemm:
+                raise ValueError("SlideSparse baseline requires the DeepGEMM dispatcher")
+            from baselines.moe_batch.slidesparse_moe import SlideSparseProjection
+
+            self.slidesparse_projections = (
+                SlideSparseProjection(layer.w13_weight),
+                SlideSparseProjection(layer.w2_weight),
+            )
+            logger.info("SlideSparse 25% routed experts: activation preparation + cuSPARSELt")
+
         return
 
     def maybe_restore_flashinfer_trtllm_bf16_weight_shape_for_load(
@@ -530,17 +541,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         else:
             backend = MoeRunnerBackend.TRITON
         self.runner = MoeRunner(backend, moe_runner_config)
-
-        if get_bool_env_var("SGLANG_SLIDESPARSE_BASELINE"):
-            if not self.use_deep_gemm:
-                raise ValueError("SlideSparse baseline requires the DeepGEMM dispatcher")
-            from baselines.moe_batch.slidesparse_moe import SlideSparseProjection
-
-            self.slidesparse_projections = (
-                SlideSparseProjection(layer.w13_weight),
-                SlideSparseProjection(layer.w2_weight),
-            )
-            logger.info("SlideSparse 25%% routed experts: activation preparation + cuSPARSELt")
 
         # aiter CK fused-MoE only supports 128-aligned shapes; otherwise use triton.
         self._aiter_runner: Optional[MoeRunner] = None
