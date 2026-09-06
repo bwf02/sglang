@@ -29,7 +29,7 @@ class SlideSparseCapacityTest(unittest.TestCase):
         try:
             x = torch.randn(6, 128, device="cuda", dtype=torch.bfloat16)
             expected = (x.float() @ layer.weight.cuda().float().T).bfloat16()
-            actual, _ = layer(x)
+            actual = layer.quant_method.apply(layer, x)
             torch.testing.assert_close(actual, expected, rtol=2e-2, atol=5e-2)
         finally:
             projection.close()
