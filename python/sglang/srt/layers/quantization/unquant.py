@@ -182,6 +182,19 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if _is_cpu and _is_cpu_amx_available:
             _amx_process_weight_after_loading(layer, ["weight"])
+        prefix = getattr(layer, "prefix", "").split(".")
+        if (
+            get_bool_env_var("SGLANG_SLIDESPARSE_BASELINE")
+            and prefix[-1] in ("gate_up_proj", "down_proj")
+            and any(part in ("shared_expert", "shared_experts") for part in prefix)
+        ):
+            from baselines.moe_batch.slidesparse_moe import SlideSparseProjection
+
+            self.slidesparse_projection = SlideSparseProjection(
+                layer.weight.unsqueeze(0), offload_source=True
+            )
+            layer.weight.data = self.slidesparse_projection.weight[0]
+            logger.info("SlideSparse 25% shared projection: %s", ".".join(prefix))
 
     def apply(
         self,
@@ -189,6 +202,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        projection = getattr(self, "slidesparse_projection", None)
+        if projection is not None:
+            if x.numel() == 0:
+                return x.new_empty((*x.shape[:-1], layer.weight.shape[0]))
+            output = projection(x.reshape(1, -1, x.shape[-1]))
+            output = output.reshape(*x.shape[:-1], layer.weight.shape[0])
+            return output if bias is None else output + bias
         if use_intel_amx_backend(layer):
             x_shapes = x.shape
             if len(x_shapes) == 3:
