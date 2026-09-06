@@ -464,9 +464,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             from baselines.moe_batch.slidesparse_moe import SlideSparseProjection
 
             self.slidesparse_projections = (
-                SlideSparseProjection(layer.w13_weight),
-                SlideSparseProjection(layer.w2_weight),
+                SlideSparseProjection(layer.w13_weight, offload_source=True),
+                SlideSparseProjection(layer.w2_weight, offload_source=True),
             )
+            # Shape/dtype remain available to the dispatcher; GEMM uses packed weights.
+            layer.w13_weight.data = self.slidesparse_projections[0].weight
+            layer.w2_weight.data = self.slidesparse_projections[1].weight
             logger.info("SlideSparse 25% routed experts: activation preparation + cuSPARSELt")
 
         return
