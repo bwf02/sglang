@@ -1321,6 +1321,7 @@ def moe_ep_deepgemm_preprocess(
     block_shape,
     output_dtype: torch.dtype = torch.float8_e4m3fn,
     m_alignment: int = 256,
+    batched_capacity: bool = False,
 ):
     reorder_topk_ids, reorder_ids = torch.sort(topk_ids.view(-1), stable=True)
     seg_indptr = torch.zeros(
@@ -1341,7 +1342,17 @@ def moe_ep_deepgemm_preprocess(
     # For masked grouped GEMM, per-expert capacity must be block-M aligned.
     # Keep DeepGEMM's historical 256-row overpadding by default; SparseGEMM
     # passes 64/128 explicitly to hit its small-M grouped kernels during decode.
-    if m_alignment == 256:
+    if batched_capacity:
+        # Decode uses a routing-independent upper bound for CUDA Graph replay.
+        # Large eager batches pay the count readback as part of preparation.
+        if hidden_states.size(0) <= 512:
+            capacity = topk_ids.numel()
+        else:
+            if torch.cuda.is_current_stream_capturing():
+                raise ValueError("SlideSparse graph capture supports at most 512 tokens")
+            capacity = int(masked_m.max().item())
+        m_max = max(64, ceil_div(capacity, 64) * 64)
+    elif m_alignment == 256:
         m_max = (hidden_states.size(0) // 256 + 1) * 256
     else:
         m_max = (

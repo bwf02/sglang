@@ -619,6 +619,7 @@ def pre_permute_standard_to_deep_gemm(
             runner_config.top_k,
             quant_info.block_shape,
             output_dtype=output_dtype,
+            batched_capacity=quant_info.slidesparse_projections is not None,
         )
     )
 
