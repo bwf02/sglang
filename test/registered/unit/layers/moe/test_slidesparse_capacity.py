@@ -21,7 +21,7 @@ class SlideSparseCapacityTest(unittest.TestCase):
         method = UnquantizedLinearMethod()
         with patch.dict("os.environ", {"SGLANG_SLIDESPARSE_BASELINE": "1"}):
             method.process_weights_after_loading(layer)
-        x = torch.randn(16, 128, device="cuda", dtype=torch.bfloat16)
+        x = torch.randn(6, 128, device="cuda", dtype=torch.bfloat16)
         bias = torch.randn(64, device="cuda", dtype=torch.bfloat16)
         try:
             expected = (x.float() @ layer.weight.cuda().float().T).bfloat16() + bias
