@@ -10,6 +10,30 @@ from sglang.srt.layers.moe.ep_moe.kernels import moe_ep_deepgemm_preprocess
 
 @unittest.skipUnless(torch.cuda.is_available(), "Requires CUDA")
 class SlideSparseCapacityTest(unittest.TestCase):
+    def test_shared_row_parallel_down_projection(self):
+        from unittest.mock import patch
+        from sglang.srt.layers.linear import RowParallelLinear
+
+        prefix = "model.layers.0.mlp.shared_expert.down_proj"
+        with torch.device("cuda"):
+            layer = RowParallelLinear(
+                128, 64, bias=False, params_dtype=torch.bfloat16,
+                prefix=prefix, tp_rank=0, tp_size=1,
+            )
+        self.assertEqual(layer.prefix, prefix)
+        with torch.no_grad():
+            layer.weight.normal_()
+        with patch.dict("os.environ", {"SGLANG_SLIDESPARSE_BASELINE": "1"}):
+            layer.quant_method.process_weights_after_loading(layer)
+        projection = layer.quant_method.slidesparse_projection
+        try:
+            x = torch.randn(6, 128, device="cuda", dtype=torch.bfloat16)
+            expected = (x.float() @ layer.weight.cuda().float().T).bfloat16()
+            actual, _ = layer(x)
+            torch.testing.assert_close(actual, expected, rtol=2e-2, atol=5e-2)
+        finally:
+            projection.close()
+
     def test_shared_linear_preserves_bias_and_output(self):
         from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 
