@@ -531,6 +531,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             backend = MoeRunnerBackend.TRITON
         self.runner = MoeRunner(backend, moe_runner_config)
 
+        if get_bool_env_var("SGLANG_SLIDESPARSE_BASELINE"):
+            if not self.use_deep_gemm:
+                raise ValueError("SlideSparse baseline requires the DeepGEMM dispatcher")
+            from baselines.moe_batch.slidesparse_moe import SlideSparseProjection
+
+            self.slidesparse_projections = (
+                SlideSparseProjection(layer.w13_weight),
+                SlideSparseProjection(layer.w2_weight),
+            )
+            logger.info("SlideSparse 25%% routed experts: activation preparation + cuSPARSELt")
+
         # aiter CK fused-MoE only supports 128-aligned shapes; otherwise use triton.
         self._aiter_runner: Optional[MoeRunner] = None
         if (
@@ -605,6 +616,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 w13_weight=w13_weight,
                 w2_weight=w2_weight,
                 use_fp8=use_fp8,
+                slidesparse_projections=getattr(self, "slidesparse_projections", None),
             )
             return self.runner.run(dispatch_output, quant_info)
         elif self.runner.runner_backend.is_sparse_gemm():

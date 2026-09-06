@@ -119,6 +119,7 @@ class DeepGemmMoeQuantInfo(MoeQuantInfo):
     block_shape: Optional[List[int]] = None
     # DSV4 mxfp4 layout flag; selects recipe_a=(1,128)/recipe_b=(1,32) downstream.
     is_fp4_experts: bool = False
+    slidesparse_projections: Optional[Tuple[Any, Any]] = None
 
 
 class DeepGemmRunnerCore(MoeRunnerCore):
@@ -141,6 +142,11 @@ class DeepGemmRunnerCore(MoeRunnerCore):
         hooks: Optional[Any] = None,
     ) -> DeepGemmRunnerOutput:
         weight_dtype = quant_info.w13_weight.dtype
+        if quant_info.slidesparse_projections is not None:
+            if not runner_input.use_masked_gemm or weight_dtype != torch.bfloat16:
+                raise ValueError("SlideSparse baseline requires masked BF16 dispatch")
+            hidden_states = self._run_slidesparse_gemm(runner_input, quant_info)
+            return DeepGemmRunnerOutput(hidden_states=hidden_states)
         if not runner_input.use_masked_gemm:
             if weight_dtype == torch.bfloat16:
                 hidden_states = self._run_bf16_contiguous_gemm(
@@ -494,6 +500,19 @@ class DeepGemmRunnerCore(MoeRunnerCore):
             meta_overlap_args["threshold"] = threshold
 
         return down_output
+
+    def _run_slidesparse_gemm(self, runner_input, quant_info):
+        from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_masked_fwd
+
+        gate_up, down = quant_info.slidesparse_projections
+        gateup_output = gate_up(runner_input.hidden_states)
+        # Invalid expert rows must be initialized before cuSPARSELt reads them.
+        down_input = torch.zeros(
+            (*gateup_output.shape[:2], gateup_output.shape[2] // 2),
+            dtype=gateup_output.dtype, device=gateup_output.device,
+        )
+        silu_and_mul_masked_fwd(gateup_output, down_input, runner_input.masked_m)
+        return down(down_input)
 
     def _run_masked_bf16_gemm(
         self,
