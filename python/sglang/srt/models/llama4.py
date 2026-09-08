@@ -57,6 +57,7 @@ from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import (
     add_prefix,
     fast_topk,
+    get_bool_env_var,
     get_compiler_backend,
     is_cuda,
     is_npu,
@@ -66,6 +67,9 @@ from sglang.srt.utils.common import get_current_device_stream_fast
 
 _is_cuda = is_cuda()
 _is_npu = is_npu()
+_SGLANG_MOE_PREFILL_DUAL_STREAM = get_bool_env_var(
+    "SGLANG_MOE_PREFILL_DUAL_STREAM"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +91,7 @@ class Llama4SharedExpert(LlamaMLP):
         use_reduce_scatter: bool = False,
     ):
         sparse_min_m = int(
-            os.environ.get("SGLANG_SPARSE_GEMM_SHARED_MIN_M", "4096")
+            os.environ.get("SGLANG_SPARSE_GEMM_SHARED_MIN_M", "8192")
         )
         if sparse_min_m < 0:
             raise ValueError("SGLANG_SPARSE_GEMM_SHARED_MIN_M must be >= 0")
@@ -196,7 +200,7 @@ class Llama4MoE(nn.Module):
         return out_aD
 
     def _forward_core(self, hidden_states, forward_mode: ForwardMode):
-        if _is_cuda:
+        if _is_cuda and _SGLANG_MOE_PREFILL_DUAL_STREAM:
             return self._forward_core_shared_routed_overlap(hidden_states)
         else:
             return self._forward_core_normal(hidden_states)
