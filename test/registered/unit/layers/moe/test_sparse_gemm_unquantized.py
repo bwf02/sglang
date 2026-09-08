@@ -18,7 +18,7 @@ from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
 
 class TestSparseGemmUnquantizedWeights(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-    def test_topk_one_masked_preprocess(self):
+    def test_infers_topk_one_for_masked_preprocess(self):
         from sglang.srt.layers.moe.ep_moe.kernels import (
             moe_ep_deepgemm_preprocess,
         )
@@ -32,7 +32,7 @@ class TestSparseGemmUnquantizedWeights(unittest.TestCase):
             topk_ids,
             num_local_experts=4,
             hidden_states=hidden_states,
-            top_k=1,
+            top_k=None,
             block_shape=None,
             output_dtype=torch.bfloat16,
             m_alignment=64,

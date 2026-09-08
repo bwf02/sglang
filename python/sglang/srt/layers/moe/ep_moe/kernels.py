@@ -1323,6 +1323,10 @@ def moe_ep_deepgemm_preprocess(
     m_alignment: int = 256,
     batched_capacity: bool = False,
 ):
+    if top_k is None:
+        if topk_ids.ndim != 2:
+            raise ValueError("topk_ids must be 2D when top_k is not configured")
+        top_k = topk_ids.shape[1]
     reorder_topk_ids, reorder_ids = torch.sort(topk_ids.view(-1), stable=True)
     seg_indptr = torch.zeros(
         num_local_experts + 1, device=topk_ids.device, dtype=torch.int64
@@ -1425,6 +1429,10 @@ def moe_ep_sparse_gemm_contiguous_preprocess(
     output_dtype: torch.dtype = torch.bfloat16,
 ):
     assert output_dtype == torch.bfloat16
+    if top_k is None:
+        if topk_ids.ndim != 2:
+            raise ValueError("topk_ids must be 2D when top_k is not configured")
+        top_k = topk_ids.shape[1]
     reorder_topk_ids, reorder_ids = torch.sort(topk_ids.view(-1), stable=True)
     seg_indptr = torch.zeros(
         num_local_experts + 1, device=topk_ids.device, dtype=torch.int64
